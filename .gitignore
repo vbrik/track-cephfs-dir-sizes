@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.ruff_cache/
+# Anonymization keys and raw (not anonymized) captures must never be committed.
+*.key
+/.keys/
+/captures/
