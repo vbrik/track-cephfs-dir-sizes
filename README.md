@@ -5,10 +5,10 @@ over time. It reads CephFS recursive statistics (`ceph.dir.rbytes`,
 `rfiles`, `rsubdirs`, `rctime`), so the size of a whole subtree costs one
 metadata request instead of a full scan.
 
-Status: `trackdir capture` works, and `trackdir sample` stores samples of a
-tree in PostgreSQL: the first one holds every directory, later ones only what
-changed. Readers of the database (reports, queries by size growth) are not
-written yet.
+Status: `trackdir capture` works, `trackdir sample` stores samples of a
+tree in PostgreSQL (the first one holds every directory, later ones only what
+changed), and `trackdir db summary` reports what the database holds. Queries
+by size growth are not written yet.
 
 ## Requirements
 
@@ -157,6 +157,34 @@ string or URI. Put the password in `~/.pgpass` or `PGPASSWORD`, never in
   about 0.5 GB retained, and up to about 1.6 GB at peak while loading, per
   million current directories. The default `--max-dirs` is 1,000,000, so large
   trees need RAM accordingly.
+
+## Summarize the database
+
+    trackdir db summary                  # every tree, its 10 newest samples
+    trackdir db summary --tree 3 --samples 50
+    trackdir db summary --json | jq '.trees[] | {id, current_dirs}'
+
+`db summary` is read-only and prints to stdout: the database's totals (trees,
+samples, `dir_state` rows, size on disk), then for each tree its identity, its
+samples' time span, its current directories and errors, ROOT's rbytes, rfiles
+and rsubdirs with their change since the tree's first sample, and a table of
+the newest samples (placeholders):
+
+    Tree 1 (cluster 1111…, default filesystem, path /proj/sub, depth 4, max dirs 1000000)
+      samples: 2, 2026-10-16T20:48:11Z to 2026-10-16T20:48:30Z
+      current: 72017 directories; 41 had errors: open EACCES 41
+      ROOT:    1.2 PiB, 412345678 files, 5123456 directories, last changed in sample 2
+      change:  +20.5 GiB, +1234 files, -3 directories since sample 1
+      sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
+           2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
+           1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
+
+A stored directory is new if it had no current row before the sample, else
+modified; deleted counts tombstones. ROOT's rstats cover its whole subtree,
+not just the tracked space. Telling new from modified reads every `dir_state`
+row of the trees reported, so the report takes time in proportion to them.
+`--json` gives the same data as one JSON document, with paths fsdecoded as in
+captures and times in ISO 8601 UTC.
 
 ## Development
 

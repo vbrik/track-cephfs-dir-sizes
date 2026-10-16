@@ -30,5 +30,6 @@
 | current state | Each directory's latest dir state across a tree's samples, by `(started, id)` of the sample, without tombstoned paths (view `trackdir.current_dir_state`). |
 | unchanged | A probed directory whose row equals its baseline row in every dir state column. Unless it is in the retry set, its children are not listed. |
 | skipped (pruned) subtree | An unchanged directory above max depth and outside the retry set, whose children the walk did not read. |
+| new, modified | A row a sample stored is new if its path had no current row before the sample (never seen, or tombstoned), else modified. `db summary` counts both per sample. |
 | tombstone | A dir state row with `deleted` true and no other values: the path was deleted. Every deleted directory gets one, including each of its baseline descendants. A path created again later gets an ordinary row. |
 | retry set | The paths with an error row in the baseline plus all their ancestors; they are listed even if unchanged, so errors are retried by every sample. |

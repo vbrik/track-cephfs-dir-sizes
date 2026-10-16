@@ -37,8 +37,9 @@
   has no `ON DELETE CASCADE`. Counts of what a sample stored are counted from
   its `dir_state` rows, not stored on `sample`.
 - A tree's latest sample is the one with the greatest `(started, id)`, in the
-  baseline, the view, the order guard and the stale-baseline check alike. A sample
-  must start later than the latest one, so this is also the greatest `id`.
+  baseline, the view, the order guard, the stale-baseline check and the summary
+  alike. A sample must start later than the latest one, so this is also the
+  greatest `id`.
 - A path that is not in the view is deleted or never stored; unchanged
   directories carry no row in newer samples, so absence from a sample means
   nothing.

@@ -1,4 +1,5 @@
-"""PostgreSQL storage of samples: the schema, the baseline and the sample store.
+"""PostgreSQL storage of samples: the schema, the baseline, the sample store and
+the statistics of what is stored.
 
 psycopg is imported only when a function needs it, so the rest of trackdir,
 capture included, works without it. Errors raised by psycopg inside this
@@ -7,16 +8,17 @@ Writes run in one transaction each, so a failure or interrupt stores nothing.
 """
 
 import os
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from types import ModuleType
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from trackdir.baseline import ROW_COLUMNS, Baseline, Row, SampleDiff, row_of
 from trackdir.capture import CaptureHeader
-from trackdir.model import DirProbe
+from trackdir.model import ROOT, DirProbe
 
 if TYPE_CHECKING:
     import psycopg
@@ -202,6 +204,68 @@ class OutOfOrderSample(SampleConflict):
         )
         self.started = started
         self.latest_started = latest_started
+
+
+@dataclass(frozen=True, slots=True)
+class RootTotals:
+    """ROOT's rstats as one sample stored them: the size of the whole tree."""
+
+    sample_id: int
+    rbytes: int
+    rfiles: int
+    rsubdirs: int
+
+
+@dataclass(frozen=True, slots=True)
+class SampleStats:
+    """One sample: its run, and what it stored.
+
+    A stored row is new if its path had no current row before the sample,
+    else modified; deleted counts tombstones.
+    """
+
+    id: int
+    started: datetime
+    finished: datetime
+    probed: int
+    errors: int  # probed directories with an error
+    new: int
+    modified: int
+    deleted: int
+    euid: int
+    host: str | None
+    root: bytes  # ROOT's local path on the host that read the filesystem
+    anonymized: bool
+    replayed_from: str | None  # absolute capture path; None for a live sample
+    kind: Literal["initial", "incremental"]  # as run_sample decided it
+
+
+@dataclass(frozen=True, slots=True)
+class TreeStats:
+    """One tree: its samples and its current state."""
+
+    id: int
+    key: TreeKey
+    samples: int
+    first_started: datetime | None  # None: the tree has no samples
+    last_started: datetime | None
+    current_dirs: int
+    current_errors: Counter[tuple[str, str]]  # (stage, code) -> directories
+    root_now: RootTotals | None  # None if ROOT's current row has no rstats
+    root_first: RootTotals | None  # earliest ROOT row with rstats
+    recent: tuple[SampleStats, ...]  # newest first
+
+
+@dataclass(frozen=True, slots=True)
+class DbStats:
+    """The whole database's counts, and the statistics of some of its trees."""
+
+    schema_version: int
+    trees: int
+    samples: int
+    dir_states: int
+    bytes_on_disk: int  # tables with their indexes and TOAST
+    tree_stats: tuple[TreeStats, ...]  # by id
 
 
 def tree_key_of(header: CaptureHeader, max_dirs: int) -> TreeKey:
@@ -401,6 +465,134 @@ def store_sample(
             for path in diff.deleted:
                 copy.write_row((sample_id, path, *gone, True))
     return sample_id
+
+
+def summarize(
+    conn: "psycopg.Connection", tree_id: int | None = None, recent: int = 10
+) -> DbStats:
+    """Return the database's statistics, with those of tree TREE_ID or all trees.
+
+    An unknown TREE_ID gives no tree statistics. Each tree lists its RECENT
+    newest samples. Telling new rows from modified ones, and so a sample's kind,
+    sorts every dir_state row of the trees; one READ ONLY REPEATABLE READ
+    transaction keeps all numbers consistent. Raises SchemaMissing or
+    SchemaVersionMismatch unless the schema is current.
+    """
+    with _db_errors(), conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        _check_version(conn)
+        counts = cur.execute(_COUNTS).fetchone()
+        params = {"tree": tree_id}
+        trees = cur.execute(_TREES, params).fetchall()
+        samples = _group(cur.execute(_SAMPLES, params))
+        roots = _group(cur.execute(_ROOT_ROWS, {**params, "root": ROOT}))
+        errors = _group(cur.execute(_CURRENT_ERRORS, params))
+    tree_stats = tuple(
+        _tree_stats(
+            tree_id,
+            TreeKey(*key),
+            samples.get(tree_id, []),
+            roots.get(tree_id, []),
+            errors.get(tree_id, []),
+            recent,
+        )
+        for tree_id, *key in trees
+    )
+    return DbStats(SCHEMA_VERSION, *counts, tree_stats)
+
+
+# Queries of summarize(); %(tree)s is a tree id or NULL for all trees.
+_COUNTS = """SELECT (SELECT count(*) FROM trackdir.tree),
+       (SELECT count(*) FROM trackdir.sample),
+       (SELECT count(*) FROM trackdir.dir_state),
+       (SELECT coalesce(sum(pg_total_relation_size(oid)), 0)::bigint
+        FROM pg_class WHERE relnamespace = 'trackdir'::regnamespace AND relkind = 'r')
+"""
+_IN_TREE = "(%(tree)s::bigint IS NULL OR {column} = %(tree)s::bigint)"
+_TREES = (
+    "SELECT id, cluster_fsid, fs_name, fs_path, max_depth, max_dirs"
+    f" FROM trackdir.tree WHERE {_IN_TREE.format(column='id')} ORDER BY id"
+)
+# Each tree's samples, oldest first, with what they stored. A row is new unless
+# the path's previous row (in the view's order) exists and is no tombstone.
+# Columns after tree_id are SampleStats's fields in order, but for kind.
+_SAMPLES = f"""WITH history AS (
+    SELECT d.sample_id, d.deleted,
+           lag(d.deleted) OVER (PARTITION BY s.tree_id, d.path
+                                ORDER BY s.started, s.id) AS was_deleted
+    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
+    WHERE {_IN_TREE.format(column="s.tree_id")}
+), stored AS (
+    SELECT sample_id,
+           count(*) FILTER (WHERE NOT deleted AND coalesce(was_deleted, true)) AS new,
+           count(*) FILTER (WHERE NOT deleted AND NOT was_deleted) AS modified,
+           count(*) FILTER (WHERE deleted) AS deleted
+    FROM history GROUP BY sample_id
+)
+SELECT s.tree_id, s.id, s.started, s.finished, s.dirs, s.errors,
+       coalesce(st.new, 0), coalesce(st.modified, 0), coalesce(st.deleted, 0),
+       s.euid, s.host, s.root, s.anonymized, s.replayed_from
+FROM trackdir.sample s LEFT JOIN stored st ON st.sample_id = s.id
+WHERE {_IN_TREE.format(column="s.tree_id")}
+ORDER BY s.tree_id, s.started, s.id
+"""
+# ROOT's rows, oldest first; the primary key finds each from its sample.
+_ROOT_ROWS = f"""SELECT s.tree_id, s.id, d.rbytes, d.rfiles, d.rsubdirs
+FROM trackdir.sample s
+JOIN trackdir.dir_state d ON d.sample_id = s.id AND d.path = %(root)s
+WHERE {_IN_TREE.format(column="s.tree_id")}
+ORDER BY s.tree_id, s.started, s.id
+"""
+_CURRENT_ERRORS = f"""SELECT tree_id, error_stage, error_code, count(*)
+FROM trackdir.current_dir_state
+WHERE error_stage IS NOT NULL AND {_IN_TREE.format(column="tree_id")}
+GROUP BY tree_id, error_stage, error_code
+"""
+
+
+def _group(rows: Iterator[tuple]) -> dict[int, list[tuple]]:
+    """Return ROWS by their first column, without it, in order."""
+    groups: dict[int, list[tuple]] = {}
+    for first, *rest in rows:
+        groups.setdefault(first, []).append(tuple(rest))
+    return groups
+
+
+def _tree_stats(
+    tree_id: int,
+    key: TreeKey,
+    samples: list[tuple],
+    roots: list[tuple],
+    errors: list[tuple],
+    recent: int,
+) -> TreeStats:
+    """Return the statistics of a tree from the rows of summarize's queries.
+
+    A sample is initial if no directory was current before it: the running
+    count of new minus deleted rows is zero, as the baseline was empty.
+    """
+    current = 0
+    stats: list[SampleStats] = []
+    for row in samples:
+        stat = SampleStats(*row, kind="incremental" if current else "initial")
+        current += stat.new - stat.deleted
+        stats.append(stat)
+    with_rstats = [RootTotals(*row) for row in roots if row[1] is not None]
+    root_now = None
+    if roots and roots[-1][1] is not None:
+        root_now = RootTotals(*roots[-1])
+    return TreeStats(
+        id=tree_id,
+        key=key,
+        samples=len(stats),
+        first_started=stats[0].started if stats else None,
+        last_started=stats[-1].started if stats else None,
+        current_dirs=current,
+        current_errors=Counter({(stage, code): n for stage, code, n in errors}),
+        root_now=root_now,
+        root_first=with_rstats[0] if with_rstats else None,
+        recent=tuple(reversed(stats[-recent:])) if recent else (),
+    )
 
 
 def _lock_tree(cur: "psycopg.Cursor", key: TreeKey) -> int:

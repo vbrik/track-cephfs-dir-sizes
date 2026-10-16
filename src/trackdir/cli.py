@@ -1,4 +1,4 @@
-"""Command-line interface: trackdir capture, sample and db init."""
+"""Command-line interface: trackdir capture, sample, db init and db summary."""
 
 import argparse
 import contextlib
@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from trackdir import __version__, dbcli, sample
+from trackdir import __version__, dbcli, sample, summary
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
 from trackdir.live import (
@@ -96,6 +96,21 @@ Changes the database; safe to repeat.
 
 DB_INIT_EPILOG = _exit_status(dbcli.DB_UNCHANGED, "also when the schema already exists")
 
+DB_SUMMARY_DESCRIPTION = f"""\
+Report what the database given by --db or {dbcli.DSN_ENV} holds: totals, then
+for each tree its samples, its current directories and errors, ROOT's size and
+its change since the first sample, and the newest samples with what each
+stored. Read-only; the report goes to stdout.
+"""
+
+DB_SUMMARY_EPILOG = f"""\
+A sample is initial if its tree had no current directories before it, else
+incremental. A directory a sample stored is new if it had no current row
+before the sample, else modified; deleted counts its tombstones. Telling them
+apart reads every stored row of the trees reported.
+
+{_exit_status(dbcli.DB_UNCHANGED)}"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaptureOptions:
@@ -128,7 +143,7 @@ class CaptureResult:
 class _Command:
     """A parsed command line, ready to run."""
 
-    run: Callable[[], str]  # does the work; returns the success message
+    run: Callable[[], str]  # does the work; returns the message for stderr, or ""
     unchanged: str  # what an interrupted run leaves, e.g. "nothing was stored"
 
 
@@ -242,6 +257,17 @@ def _prepare_db_init(args: argparse.Namespace) -> _Command:
         lambda: sample.render_db_init(sample.run_db_init(dsn)),
         dbcli.DB_UNCHANGED,
     )
+
+
+def _prepare_db_summary(args: argparse.Namespace) -> _Command:
+    dsn = _dsn(args)
+    render = summary.render_json if args.json else summary.render_text
+
+    def run() -> str:
+        sys.stdout.write(render(summary.run_summary(dsn, args.tree, args.samples)))
+        return ""
+
+    return _Command(run, dbcli.DB_UNCHANGED)
 
 
 def _jobs(args: argparse.Namespace) -> int:
@@ -428,8 +454,8 @@ def _parser() -> argparse.ArgumentParser:
 
     db = commands.add_parser(
         "db",
-        help="manage trackdir's database schema",
-        description="Manage trackdir's database schema.",
+        help="create or summarize trackdir's database",
+        description="Create or summarize trackdir's database.",
     )
     db_commands = db.add_subparsers(dest="db_command", required=True, metavar="COMMAND")
     init = _add_command(
@@ -441,6 +467,28 @@ def _parser() -> argparse.ArgumentParser:
         epilog=DB_INIT_EPILOG,
     )
     _add_db(init)
+    summarize = _add_command(
+        db_commands,
+        "summary",
+        _prepare_db_summary,
+        help="report trees, samples and sizes stored in the database",
+        description=DB_SUMMARY_DESCRIPTION,
+        epilog=DB_SUMMARY_EPILOG,
+    )
+    summarize.add_argument(
+        "--tree", type=_int_between(1), metavar="ID", help="report tree ID only"
+    )
+    summarize.add_argument(
+        "--samples",
+        type=_int_between(0),
+        default=10,
+        metavar="N",
+        help="list the N newest samples of each tree (default: %(default)s)",
+    )
+    summarize.add_argument(
+        "--json", action="store_true", help="print JSON instead of text"
+    )
+    _add_db(summarize)
     return parser
 
 
