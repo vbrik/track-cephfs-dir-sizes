@@ -64,6 +64,32 @@ with `zcat FILE | jq`.
 Tests need neither Ceph nor root; real data comes from anonymized captures
 in `tests/data/`.
 
+### Development database
+
+`scripts/postgres.sh` runs a disposable PostgreSQL 18 server in a rootless
+podman container, for developing and testing trackdir (needs podman; the first
+start pulls the image):
+
+    scripts/postgres.sh start              # data kept in volume trackdir-pg-data
+    scripts/postgres.sh start --ephemeral  # data in memory, gone after stop
+    scripts/postgres.sh status             # state=, mode=, port= lines; exit 0 if running
+    scripts/postgres.sh url                # postgresql://trackdir:trackdir@127.0.0.1:5432/trackdir
+    scripts/postgres.sh psql               # psql inside the container
+    scripts/postgres.sh reset              # recreate databases trackdir and trackdir_test
+    scripts/postgres.sh stop
+    scripts/postgres.sh destroy            # remove the container and the volume
+
+Start creates two databases: `trackdir` for development and `trackdir_test`,
+which tests may wipe (`url --test` prints its connection string). The server
+listens on 127.0.0.1 only, with fixed credentials (user, password and database
+are all `trackdir`); any local user on the machine can connect, so keep real
+data out of it. `TRACKDIR_PG_PORT` (default 5432) and `TRACKDIR_PG_IMAGE` (a
+PostgreSQL 18 or newer image) apply when the container is created; run
+`destroy` first to change them. `TRACKDIR_PG_READY_TIMEOUT` (seconds, default
+30) is how long each `start` waits for the server.
+The script touches only the container `trackdir-postgres` and the volume
+`trackdir-pg-data`.
+
 ## Documentation
 
 - [docs/terms.md](docs/terms.md): terms used in code and docs.

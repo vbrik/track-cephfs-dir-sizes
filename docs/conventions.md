@@ -18,3 +18,6 @@
   `WARNING:`; stdout carries results only.
 - Tests need neither Ceph nor root. Real CephFS data enters tests only as
   anonymized captures in `tests/data/`.
+- The development database is the podman container `trackdir-postgres`,
+  managed by `scripts/postgres.sh`; the existing tests do not need it.
+  `tests/test_postgres_script.py` tests the script against a stub `podman`.
