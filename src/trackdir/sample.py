@@ -253,7 +253,7 @@ def _walk_live(opts: SampleOptions, warn: Callable[[str], None]) -> _Walk:
             max_depth=opts.max_depth,
             max_dirs=opts.max_dirs,
             jobs=opts.jobs,
-            should_list=should_list_changed(baseline, opts.max_depth),
+            should_list=should_list_changed(baseline),
             limit_advice=SAMPLE_LIMIT_ADVICE,
         )
     return _Walk(walked.header, key, baseline, walked.probes, walked.elapsed)
@@ -270,7 +270,7 @@ def _walk_replay(opts: SampleOptions) -> _Walk:
     baseline = _precheck(opts.dsn, key, started)
     clock = time.monotonic()
     header, probes = replay_walk(
-        capture, max_depth, opts.max_dirs, should_list_changed(baseline, max_depth)
+        capture, max_depth, opts.max_dirs, should_list_changed(baseline)
     )
     return _Walk(header, key, baseline, probes, time.monotonic() - clock)
 

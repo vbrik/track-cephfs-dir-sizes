@@ -120,14 +120,21 @@ def walk_within(
 ) -> list[DirProbe]:
     """Walk BACKEND down to MAX_DEPTH and return the probes in tree order.
 
-    SHOULD_LIST decides which directories to list; it must not list one at
-    MAX_DEPTH. None lists every directory above MAX_DEPTH. Raises FatalError,
-    ending in LIMIT_ADVICE, if more than MAX_DIRS directories are probed.
+    SHOULD_LIST decides which directories above MAX_DEPTH to list (None: all of
+    them); no directory at MAX_DEPTH is listed whatever it says. Raises
+    FatalError, ending in LIMIT_ADVICE, if more than MAX_DIRS directories are
+    probed.
     """
+    above = list_above(max_depth)
     if should_list is None:
-        should_list = list_above(max_depth)
+        listed = above
+    else:
+
+        def listed(probe: DirProbe) -> bool:
+            return above(probe) and should_list(probe)
+
     try:
-        return walk(backend, should_list, max_dirs=max_dirs, jobs=jobs)
+        return walk(backend, listed, max_dirs=max_dirs, jobs=jobs)
     except DirLimitExceeded as e:
         raise FatalError(
             f"ROOT has more than {e.limit} directories within depth "

@@ -138,6 +138,18 @@ def test_walk_within_honors_a_custom_should_list(tree, fake_ceph):
     assert probes[1].children is None  # within max depth, but not accepted
 
 
+def test_walk_within_never_lists_at_max_depth_whatever_should_list_says(
+    tree, fake_ceph
+):
+    with open_live_root(tree, print) as root:
+        backend = LiveBackend(root.safe_root, lambda fd: live.read_rstats(fd, None))
+        probes = walk_within(
+            backend, max_depth=2, max_dirs=100, jobs=2, should_list=lambda probe: True
+        )
+    assert [p.path for p in probes] == [b".", b"a", b"a/b", b"z"]
+    assert probes[2].children is None
+
+
 def test_dir_limit_message_uses_the_given_advice(tree, fake_ceph):
     with open_live_root(tree, print) as root:
         backend = LiveBackend(root.safe_root, lambda fd: live.read_rstats(fd, None))

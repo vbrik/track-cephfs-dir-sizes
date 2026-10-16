@@ -71,16 +71,15 @@ def test_empty_baseline_has_no_sample():
     assert not b.rows and not b.retry and not b.children
 
 
-def test_empty_baseline_lists_everything_above_max_depth():
-    should_list = should_list_changed(Baseline.empty(), 2)
+def test_empty_baseline_lists_everything():
+    should_list = should_list_changed(Baseline.empty())
     assert should_list(probe(ROOT))
-    assert should_list(probe(b"a"))
-    assert not should_list(probe(b"a/b"))
+    assert should_list(probe(b"a/b"))
 
 
 def test_unchanged_directory_is_pruned():
     b = baseline_of(probe(ROOT), probe(b"a"))
-    assert not should_list_changed(b, MAX_DEPTH)(probe(b"a"))
+    assert not should_list_changed(b)(probe(b"a"))
 
 
 @pytest.mark.parametrize(
@@ -97,24 +96,19 @@ def test_unchanged_directory_is_pruned():
 def test_changed_rstat_is_listed(change):
     b = baseline_of(probe(b"a"))
     changed = probe(b"a", **change)
-    assert should_list_changed(b, MAX_DEPTH)(changed)
+    assert should_list_changed(b)(changed)
 
 
 def test_new_directory_is_listed():
     b = baseline_of(probe(ROOT))
-    assert should_list_changed(b, MAX_DEPTH)(probe(b"new"))
-
-
-def test_directory_at_max_depth_is_never_listed():
-    b = baseline_of(probe(b"a"))
-    assert not should_list_changed(b, 1)(probe(b"a", rbytes=99))
+    assert should_list_changed(b)(probe(b"new"))
 
 
 def test_error_baseline_forces_listing_of_ancestors():
     b = baseline_of(
         probe(ROOT), probe(b"a"), error_probe(b"a/b"), probe(b"z"), error_probe(b"q")
     )
-    should_list = should_list_changed(b, MAX_DEPTH)
+    should_list = should_list_changed(b)
     assert should_list(probe(ROOT))
     assert should_list(probe(b"a"))
     assert should_list(error_probe(b"a/b"))

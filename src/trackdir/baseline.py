@@ -114,17 +114,18 @@ class Baseline:
         )
 
 
-def should_list_changed(baseline: Baseline, max_depth: int) -> ShouldList:
-    """Return a should_list that lists a directory above MAX_DEPTH only if needed.
+def should_list_changed(baseline: Baseline) -> ShouldList:
+    """Return a should_list that lists a directory only if needed.
 
     A directory is listed if its row differs from its baseline row (a directory
     without one is new) or if it is in baseline.retry. Pruning is sound because
-    the rstats describe the whole subtree. The result only reads BASELINE, so
-    it is safe to call from several threads.
+    the rstats describe the whole subtree. The depth limit is the walk's to
+    enforce, as walk_within does. The result only reads BASELINE, so it is safe
+    to call from several threads.
     """
 
     def should_list(probe: DirProbe) -> bool:
-        return probe.depth < max_depth and (
+        return (
             row_of(probe) != baseline.rows.get(probe.path)
             or probe.path in baseline.retry
         )
