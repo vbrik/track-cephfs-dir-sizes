@@ -19,7 +19,14 @@ from pathlib import Path
 from trackdir import __version__
 from trackdir.capture import CaptureHeader
 from trackdir.messages import FatalError
-from trackdir.model import ROOT, Backend, DirProbe, error_counts, list_above
+from trackdir.model import (
+    ROOT,
+    Backend,
+    DirProbe,
+    ShouldList,
+    error_counts,
+    list_above,
+)
 from trackdir.mount import MountError, identify
 from trackdir.probe import LiveBackend
 from trackdir.rstats import (
@@ -32,9 +39,15 @@ from trackdir.rstats import (
 from trackdir.safeopen import SafeRoot, openat2_supported
 from trackdir.walker import DirLimitExceeded, walk
 
-# Probes stay in memory until the end: ~0.6 KB each (measured), so ~0.6 GB.
+# Probes stay in memory until the end: ~0.6 KB each (measured), so ~0.6 GB. A
+# sample also holds the baseline: ~0.5 GB per million current directories, more
+# while loading. --max-dirs is part of a tree's identity: changing this default
+# in a release splits every existing tree's history (their baselines are
+# orphaned, so each tree needs a full initial sample again).
 DEFAULT_MAX_DIRS = 1_000_000
 DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
+# What to do when a walk exceeds --max-dirs; ends the FatalError message.
+DEFAULT_LIMIT_ADVICE = "Raise --max-dirs if memory allows, or lower --max-depth."
 
 MSG_NO_OPENAT2_AS_ROOT = (
     "this kernel does not provide openat2 (Linux 5.6+), which trackdir needs "
@@ -97,30 +110,57 @@ def open_live_root(path: Path, warn: Callable[[str], None]) -> Iterator[LiveRoot
 
 
 def walk_within(
-    backend: Backend, *, max_depth: int, max_dirs: int, jobs: int
+    backend: Backend,
+    *,
+    max_depth: int,
+    max_dirs: int,
+    jobs: int,
+    should_list: ShouldList | None = None,
+    limit_advice: str = DEFAULT_LIMIT_ADVICE,
 ) -> list[DirProbe]:
     """Walk BACKEND down to MAX_DEPTH and return the probes in tree order.
 
-    Raises FatalError if there are more than MAX_DIRS directories.
+    SHOULD_LIST decides which directories to list; it must not list one at
+    MAX_DEPTH. None lists every directory above MAX_DEPTH. Raises FatalError,
+    ending in LIMIT_ADVICE, if more than MAX_DIRS directories are probed.
     """
+    if should_list is None:
+        should_list = list_above(max_depth)
     try:
-        return walk(backend, list_above(max_depth), max_dirs=max_dirs, jobs=jobs)
+        return walk(backend, should_list, max_dirs=max_dirs, jobs=jobs)
     except DirLimitExceeded as e:
         raise FatalError(
             f"ROOT has more than {e.limit} directories within depth "
-            f"{max_depth}. Raise --max-dirs if memory allows, or lower "
-            "--max-depth."
+            f"{max_depth}. {limit_advice}"
         ) from e
 
 
-def walk_live(live: LiveRoot, *, max_depth: int, max_dirs: int, jobs: int) -> LiveWalk:
-    """Walk LIVE.safe_root and build the header (anonymized=False)."""
+def walk_live(
+    live: LiveRoot,
+    *,
+    max_depth: int,
+    max_dirs: int,
+    jobs: int,
+    should_list: ShouldList | None = None,
+    limit_advice: str = DEFAULT_LIMIT_ADVICE,
+) -> LiveWalk:
+    """Walk LIVE.safe_root as walk_within does and build the header (anonymized=False).
+
+    The header's started and finished bracket the walk.
+    """
     backend = LiveBackend(
         live.safe_root, functools.partial(read_rstats, mode=live.rstat_mode)
     )
     started = datetime.now(UTC)
     clock = time.monotonic()
-    probes = walk_within(backend, max_depth=max_depth, max_dirs=max_dirs, jobs=jobs)
+    probes = walk_within(
+        backend,
+        max_depth=max_depth,
+        max_dirs=max_dirs,
+        jobs=jobs,
+        should_list=should_list,
+        limit_advice=limit_advice,
+    )
     elapsed = time.monotonic() - clock
     header = CaptureHeader(
         root=live.path,

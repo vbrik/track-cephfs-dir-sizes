@@ -3,22 +3,23 @@ import os
 import sys
 from collections import Counter
 from dataclasses import replace
+from datetime import datetime
 
 import pytest
 from conftest import SUBTREE, collapse, must_not_walk
 
 from trackdir import live, sample
-from trackdir.capture import load_capture
 from trackdir.cli import main
 from trackdir.db import (
+    ConcurrentSample,
     DbError,
-    SamplesExist,
+    OutOfOrderSample,
     SchemaVersionMismatch,
     TreeKey,
     tree_key_of,
 )
 from trackdir.messages import FatalError
-from trackdir.model import error_counts
+from trackdir.model import ROOT, error_counts
 from trackdir.sample import (
     SampleOptions,
     SampleResult,
@@ -37,17 +38,6 @@ def no_dsn_in_environment(monkeypatch):
     monkeypatch.delenv(sample.DSN_ENV, raising=False)
 
 
-@pytest.fixture(scope="module")
-def subtree():
-    return load_capture(SUBTREE)
-
-
-@pytest.fixture
-def dsn(db):
-    """The DSN of the db fixture's database, password included."""
-    return os.environ["TRACKDIR_TEST_DSN"]
-
-
 def without_children(probes):
     return [replace(p, children=None) for p in probes]
 
@@ -56,6 +46,25 @@ def test_replay_walk_at_capture_depth(subtree):
     header, probes = replay_walk(subtree, subtree.header.max_depth, max_dirs=10**6)
     assert without_children(probes) == without_children(subtree.probes.values())
     assert header == subtree.header
+
+
+def test_replay_walk_with_a_should_list_reads_only_what_it_accepts(subtree):
+    header, probes = replay_walk(
+        subtree, 3, max_dirs=10**6, should_list=lambda probe: probe.path == ROOT
+    )
+    root = subtree.probes[ROOT]
+    assert [p.path for p in probes] == [ROOT, *sorted(root.children)]
+    assert probes[0] == root
+    assert all(p.children is None for p in probes[1:])
+    assert header.max_depth == 3
+    assert header.dirs == len(probes)
+    assert header.errors == error_counts(probes).total()
+
+
+def test_dir_limit_message_names_the_tree_consequence(subtree):
+    with pytest.raises(FatalError) as exc:
+        replay_walk(subtree, 2, max_dirs=1)
+    assert "part of a tree's identity" in collapse(str(exc.value))
 
 
 def test_replay_walk_at_smaller_depth(subtree):
@@ -163,49 +172,89 @@ def result(**changes):
     fields = {
         "sample_id": 7,
         "root": "/mnt/cephfs/x",
-        "tree": TreeKey("fsid", None, b"/x"),
+        "tree": TreeKey("fsid", None, b"/x", 2, 1000),
         "max_depth": 2,
         "dirs": 5,
+        "changed": 5,
+        "deleted": 0,
+        "skipped": 0,
         "errors": Counter({("open", "EACCES"): 2}),
         "walk_seconds": 1.25,
         "store_seconds": 0.5,
         "replayed_from": None,
+        "kind": "initial",
     }
     return SampleResult(**(fields | changes))
 
 
 def test_render_sample_summary():
     assert collapse(render_sample_summary(result())) == (
-        "Stored sample 7: 5 directories under /mnt/cephfs/x to depth 2, tree "
-        "(cluster fsid, default filesystem, path /x); 2 had errors: open EACCES "
-        "2. Walk 1.2 s, store 0.5 s."
+        "Stored sample 7 (initial): 5 directories under /mnt/cephfs/x to depth 2, "
+        "tree (cluster fsid, default filesystem, path /x, depth 2, max dirs 1000); "
+        "2 had errors: open EACCES 2. Walk 1.2 s, store 0.5 s."
     )
-    replayed = result(
-        tree=TreeKey("fsid", "cephfs", b"/x"),
+    incremental = result(
+        tree=TreeKey("fsid", "cephfs", b"/x", 4, 1000),
+        max_depth=4,
+        dirs=1204,
+        changed=18,
+        deleted=2,
+        skipped=31,
         errors=Counter(),
+        walk_seconds=3.2,
+        store_seconds=0.1,
         replayed_from="/c.gz",
+        kind="incremental",
     )
-    assert collapse(render_sample_summary(replayed)) == (
-        "Stored sample 7: 5 directories under /mnt/cephfs/x to depth 2, tree "
-        "(cluster fsid, filesystem cephfs, path /x); none had errors. Walk 1.2 s, "
-        "store 0.5 s. Replayed from /c.gz."
+    assert collapse(render_sample_summary(incremental)) == (
+        "Stored sample 7 (incremental): probed 1204 directories under "
+        "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
+        "depth 4, max dirs 1000); 18 changed, 2 deleted, 31 unchanged subtrees "
+        "skipped; none had errors. Walk 3.2 s, store 0.1 s. Replayed from /c.gz."
     )
+
+
+def test_describe_tree_includes_depth_and_max_dirs():
+    key = TreeKey("fsid", None, b"/caf\xe9", 3, 500)
+    assert describe_tree(key) == (
+        "tree (cluster fsid, default filesystem, path /caf\udce9, depth 3, "
+        "max dirs 500)"
+    )
+
+
+STARTED = datetime.fromisoformat("2026-10-15T00:00:00+00:00")
+LATEST = datetime.fromisoformat("2026-10-16T00:00:00+00:00")
 
 
 @pytest.mark.parametrize("fs_name", [None, "cephfs"])
-def test_samples_exist_names_the_tree_as_the_summary_does(
-    subtree, monkeypatch, fs_name
+@pytest.mark.parametrize(
+    ("conflict", "text"),
+    [
+        (
+            lambda key: ConcurrentSample(key),
+            "another sample of the {tree} was stored while this one ran; nothing "
+            "was stored. Run trackdir sample again.",
+        ),
+        (
+            lambda key: OutOfOrderSample(key, STARTED, LATEST),
+            "this sample started at 2026-10-15T00:00:00+00:00, which is not later "
+            "than the latest sample of the {tree} (2026-10-16T00:00:00+00:00); "
+            "nothing was stored. A sample must start later than the tree's latest "
+            "sample: check the clocks of the hosts that sample this tree, and for a "
+            "replay use a newer capture.",
+        ),
+    ],
+    ids=["concurrent", "out-of-order"],
+)
+def test_conflicts_name_the_tree_as_the_summary_does(
+    subtree, monkeypatch, fs_name, conflict, text
 ):
-    key = replace(tree_key_of(subtree.header), fs_name=fs_name)
-
-    def samples_exist(dsn):
-        raise SamplesExist(key)
-
-    monkeypatch.setattr(sample, "connect", samples_exist)
+    key = replace(tree_key_of(subtree.header, 10**6), fs_name=fs_name)
+    monkeypatch.setattr(sample, "connect", fail_to_connect(conflict(key)))
     with pytest.raises(FatalError) as exc:
         run_sample(SampleOptions(dsn="x", replay=SUBTREE), print)
     tree = describe_tree(key)
-    assert f"the {tree} already has samples" in collapse(str(exc.value))
+    assert collapse(str(exc.value)) == text.format(tree=tree)
     assert tree in collapse(render_sample_summary(result(tree=key)))
 
 
@@ -233,7 +282,7 @@ def test_database_error_says_what_was_left(monkeypatch, capsys, args, outcome):
 
 @pytest.mark.parametrize(
     ("found", "next_step"),
-    [(2, "migrate it, or drop schema trackdir"), (None, "drop schema trackdir")],
+    [(1, "migrate it, or drop schema trackdir"), (None, "drop schema trackdir")],
 )
 def test_schema_version_mismatch_says_what_to_do(monkeypatch, capsys, found, next_step):
     error = SchemaVersionMismatch(found)
@@ -278,8 +327,11 @@ def test_sample_without_schema_fails(dsn, capsys):
 
 def test_replay_stores_initial_sample(db, dsn, subtree):
     sample.run_db_init(dsn)
-    res = run_sample(SampleOptions(dsn=dsn, replay=SUBTREE), print)
+    res = run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_dirs=10**5), print)
+    assert res.kind == "initial"
     assert res.dirs == subtree.header.dirs
+    assert (res.changed, res.deleted, res.skipped) == (res.dirs, 0, 0)
+    assert res.tree == tree_key_of(subtree.header, 10**5)
     assert res.errors.total() == subtree.header.errors
     assert res.max_depth == subtree.header.max_depth
     assert res.replayed_from == str(SUBTREE.resolve())
@@ -287,13 +339,16 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
     count = db.execute("SELECT count(*) FROM trackdir.dir_state").fetchone()[0]
     assert count == res.dirs
     row = db.execute(
-        "SELECT replayed_from, max_depth FROM trackdir.sample WHERE id = %s",
+        "SELECT s.replayed_from, s.max_depth, s.changed, s.deleted, t.max_depth,"
+        " t.max_dirs FROM trackdir.sample s JOIN trackdir.tree t ON t.id = s.tree_id"
+        " WHERE s.id = %s",
         (res.sample_id,),
     ).fetchone()
-    assert row == (res.replayed_from, subtree.header.max_depth)
+    depth = subtree.header.max_depth
+    assert row == (res.replayed_from, depth, res.dirs, 0, depth, 10**5)
 
 
-def test_second_replay_fails_before_walking(db, dsn, monkeypatch):
+def test_older_replay_is_refused_before_walking(db, dsn, monkeypatch):
     sample.run_db_init(dsn)
     opts = SampleOptions(dsn=dsn, replay=SUBTREE, max_depth=1)
     run_sample(opts, print)
@@ -301,8 +356,25 @@ def test_second_replay_fails_before_walking(db, dsn, monkeypatch):
     with pytest.raises(FatalError) as exc:
         run_sample(opts, print)
     message = collapse(str(exc.value))
-    assert "already has samples" in message
-    assert "incremental" in message
+    assert "not later than" in message
+    assert "nothing was stored" in message
+
+
+def test_live_sample_dated_before_latest_is_refused_before_walking(
+    db, dsn, tree, fake_ceph, monkeypatch, capsys
+):
+    sample.run_db_init(dsn)
+    args = ["sample", str(tree), "--max-depth", "3", "--db", dsn]
+    assert main(args) == 0
+    db.execute("UPDATE trackdir.sample SET started = '2999-01-01T00:00:00+00:00'")
+    capsys.readouterr()
+    monkeypatch.setattr(live, "walk", must_not_walk)
+    assert main(args) == 1
+    err = collapse(capsys.readouterr().err)
+    assert "not later than" in err
+    assert "nothing was stored" in err
+    assert "check the clocks" in err
+    assert db.execute("SELECT count(*) FROM trackdir.sample").fetchone() == (1,)
 
 
 def test_live_sample_with_fakes(db, dsn, tree, fake_ceph, capsys):
@@ -316,3 +388,16 @@ def test_live_sample_with_fakes(db, dsn, tree, fake_ceph, capsys):
         " FROM trackdir.sample s JOIN trackdir.tree t ON t.id = s.tree_id"
     ).fetchall()
     assert row == [(b"/x", None, None, 4, os.fsencode(tree.resolve()))]
+
+
+def test_live_second_sample_is_pruned_by_the_baseline(db, dsn, tree, fake_ceph, capsys):
+    sample.run_db_init(dsn)
+    args = ["sample", str(tree), "--max-depth", "3", "--db", dsn]
+    assert main(args) == 0
+    assert main(args) == 0  # the fake rstats are constant: nothing changed
+    first, second = collapse(capsys.readouterr().err).split(" Stored sample ")
+    assert first.startswith("Stored sample 1 (initial): 5 directories")
+    assert second.startswith("2 (incremental): probed 1 directories")
+    assert db.execute(
+        "SELECT id, dirs, changed, deleted FROM trackdir.sample ORDER BY id"
+    ).fetchall() == [(1, 5, 5, 0), (2, 1, 0, 0)]

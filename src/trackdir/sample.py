@@ -1,9 +1,14 @@
-"""trackdir sample and trackdir db init: store a tree's first sample in PostgreSQL.
+"""trackdir sample and trackdir db init: store samples of a tree in PostgreSQL.
 
-A sample runs in three steps, each with its own database connection or none:
-a pre-check (schema current, tree has no samples) so a doomed run fails
-before a walk that can take hours; the walk, with no connection held; the
-store, in one transaction that re-checks for samples stored meanwhile.
+A tree's first sample (initial) stores every directory; later ones
+(incremental) store only the directories whose state changed since the
+baseline, the tree's current state, and tombstones for deleted ones. Live
+samples and replays run the same steps, each with its own database connection
+or none: a pre-check (schema current, baseline loaded, a replay newer than
+the latest sample) so a doomed run fails before a walk that can take hours;
+the walk, pruned by the baseline, with no connection held; the diff against
+the baseline; the store, in one transaction that fails if another sample was
+stored meanwhile.
 """
 
 import contextlib
@@ -12,9 +17,11 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+from trackdir.baseline import Baseline, diff, should_list_changed
 from trackdir.capture import (
     Capture,
     CaptureFormatError,
@@ -24,17 +31,19 @@ from trackdir.capture import (
 )
 from trackdir.db import (
     SCHEMA_VERSION,
+    ConcurrentSample,
     DbError,
+    OutOfOrderSample,
     PsycopgMissing,
-    SamplesExist,
     SchemaMissing,
     SchemaVersionMismatch,
     TreeKey,
+    check_order,
     check_schema,
     connect,
-    has_samples,
     init_schema,
-    store_initial_sample,
+    load_baseline,
+    store_sample,
     tree_key_of,
 )
 from trackdir.live import (
@@ -45,7 +54,7 @@ from trackdir.live import (
     walk_within,
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
-from trackdir.model import DirProbe, error_counts
+from trackdir.model import DirProbe, ShouldList, error_counts
 
 if TYPE_CHECKING:
     import psycopg
@@ -57,6 +66,12 @@ DB_UNCHANGED = "the database was not changed"
 # Next step for a schema this trackdir cannot use; ends the message.
 _DROP_AND_INIT = (
     "drop schema trackdir, which deletes all stored samples, and run: trackdir db init"
+)
+# Ends the message of a walk over --max-dirs: raising it splits the history.
+SAMPLE_LIMIT_ADVICE = (
+    "--max-dirs and --max-depth are part of a tree's identity: a higher "
+    "--max-dirs or another --max-depth starts a new tree with a full initial "
+    "sample."
 )
 
 
@@ -84,28 +99,49 @@ class SampleResult:
     root: str  # resolved ROOT of the run that read the filesystem
     tree: TreeKey
     max_depth: int
-    dirs: int
+    dirs: int  # probed
+    changed: int  # rows stored, tombstones excluded
+    deleted: int  # tombstones stored
+    skipped: int  # unchanged directories not listed: pruned subtrees
     errors: Counter[tuple[str, str]]  # (stage, code) -> number of directories
     walk_seconds: float
     store_seconds: float
     replayed_from: str | None  # absolute capture path; None for a live sample
+    kind: Literal["initial", "incremental"]  # initial: the tree had no sample
+
+
+@dataclass(frozen=True, slots=True)
+class _Walk:
+    """A pre-checked walk, ready to diff and store."""
+
+    header: CaptureHeader
+    key: TreeKey
+    baseline: Baseline
+    probes: list[DirProbe]
+    seconds: float
 
 
 def replay_walk(
-    capture: Capture, max_depth: int, max_dirs: int
+    capture: Capture,
+    max_depth: int,
+    max_dirs: int,
+    should_list: ShouldList | None = None,
 ) -> tuple[CaptureHeader, list[DirProbe]]:
     """Walk CAPTURE down to MAX_DEPTH; return its header and the probes.
 
+    SHOULD_LIST is as in walk_within (None: list everything above MAX_DEPTH).
     The header keeps everything that describes the run that read the
     filesystem (times, host, trackdir_version, anonymized); max_depth, dirs
     and errors describe this walk. Raises FatalError if MAX_DEPTH exceeds the
-    capture's or there are more than MAX_DIRS directories.
+    capture's or more than MAX_DIRS directories are probed.
     """
     probes = walk_within(
         _replay_backend(capture, max_depth),
         max_depth=max_depth,
         max_dirs=max_dirs,
         jobs=1,
+        should_list=should_list,
+        limit_advice=SAMPLE_LIMIT_ADVICE,
     )
     header = replace(
         capture.header,
@@ -117,39 +153,57 @@ def replay_walk(
 
 
 def run_sample(opts: SampleOptions, warn: Callable[[str], None]) -> SampleResult:
-    """Store the first sample of the tree at opts.root or in opts.replay.
+    """Store a sample of the tree at opts.root or in opts.replay.
 
-    Calls WARN once per degraded mode of a live ROOT, before walking. Raises
+    The sample is initial if the tree has none yet, else incremental. Calls
+    WARN once per degraded mode of a live ROOT, before walking. Raises
     FatalError, before walking if the database cannot take the sample;
     KeyboardInterrupt propagates. A sample is stored only if this returns.
     """
     if opts.replay is None:
-        header, probes, walk_seconds = _walk_live(opts, warn)
+        walked = _walk_live(opts, warn)
         replayed_from = None
     else:
-        header, probes, walk_seconds = _walk_replay(opts)
+        walked = _walk_replay(opts)
         replayed_from = str(opts.replay.resolve())
+    header, baseline = walked.header, walked.baseline
+    sample_diff = diff(baseline, walked.probes, header.max_depth)
     clock = time.monotonic()
     with _database(opts.dsn, NOTHING_STORED) as conn:
-        sample_id = store_initial_sample(conn, header, probes, replayed_from)
+        sample_id = store_sample(
+            conn, header, walked.key, baseline, sample_diff, replayed_from
+        )
     return SampleResult(
         sample_id=sample_id,
         root=header.root,
-        tree=tree_key_of(header),
+        tree=walked.key,
         max_depth=header.max_depth,
         dirs=header.dirs,
-        errors=error_counts(probes),
-        walk_seconds=walk_seconds,
+        changed=len(sample_diff.changed),
+        deleted=len(sample_diff.deleted),
+        skipped=sample_diff.skipped,
+        errors=error_counts(walked.probes),
+        walk_seconds=walked.seconds,
         store_seconds=time.monotonic() - clock,
         replayed_from=replayed_from,
+        kind="initial" if baseline.sample_id is None else "incremental",
     )
 
 
 def render_sample_summary(result: SampleResult) -> str:
     """Return the success message for RESULT as one wrapped paragraph."""
+    where = (
+        f"under {result.root} to depth {result.max_depth}, {describe_tree(result.tree)}"
+    )
+    if result.kind == "initial":
+        counts = f"{result.dirs} directories {where}"
+    else:
+        counts = (
+            f"probed {result.dirs} directories {where}; {result.changed} changed, "
+            f"{result.deleted} deleted, {result.skipped} unchanged subtrees skipped"
+        )
     text = (
-        f"Stored sample {result.sample_id}: {result.dirs} directories under "
-        f"{result.root} to depth {result.max_depth}, {describe_tree(result.tree)}; "
+        f"Stored sample {result.sample_id} ({result.kind}): {counts}; "
         f"{describe_errors(result.errors)}. Walk {result.walk_seconds:.1f} s, "
         f"store {result.store_seconds:.1f} s."
     )
@@ -179,29 +233,46 @@ def render_db_init(created: bool) -> str:
     )
 
 
-def _walk_live(
-    opts: SampleOptions, warn: Callable[[str], None]
-) -> tuple[CaptureHeader, list[DirProbe], float]:
-    """Pre-check, then walk opts.root; return the header, probes and walk seconds."""
+def _walk_live(opts: SampleOptions, warn: Callable[[str], None]) -> _Walk:
+    """Pre-check, then walk opts.root pruned by the baseline."""
     assert opts.root is not None and opts.max_depth is not None
     with open_live_root(opts.root, warn) as live:
-        _precheck(opts.dsn, TreeKey.of(live.cluster_fsid, live.fs_name, live.fs_path))
-        walked = walk_live(
-            live, max_depth=opts.max_depth, max_dirs=opts.max_dirs, jobs=opts.jobs
+        key = TreeKey.of(
+            live.cluster_fsid,
+            live.fs_name,
+            live.fs_path,
+            opts.max_depth,
+            opts.max_dirs,
         )
-    return walked.header, walked.probes, walked.elapsed
+        # The real start is later than now, so this order check never refuses
+        # falsely; it fails before the walk if the tree's latest sample is
+        # dated in the future (clock skew, or another host sampled the tree).
+        baseline = _precheck(opts.dsn, key, datetime.now(UTC))
+        walked = walk_live(
+            live,
+            max_depth=opts.max_depth,
+            max_dirs=opts.max_dirs,
+            jobs=opts.jobs,
+            should_list=should_list_changed(baseline, opts.max_depth),
+            limit_advice=SAMPLE_LIMIT_ADVICE,
+        )
+    return _Walk(walked.header, key, baseline, walked.probes, walked.elapsed)
 
 
-def _walk_replay(opts: SampleOptions) -> tuple[CaptureHeader, list[DirProbe], float]:
-    """Pre-check, then walk opts.replay; return the header, probes and walk seconds."""
+def _walk_replay(opts: SampleOptions) -> _Walk:
+    """Pre-check, then walk opts.replay pruned by the baseline."""
     assert opts.replay is not None
     capture = _load(opts.replay)
     max_depth = capture.header.max_depth if opts.max_depth is None else opts.max_depth
     _replay_backend(capture, max_depth)  # fails on the depth before the pre-check
-    _precheck(opts.dsn, tree_key_of(capture.header))
+    key = tree_key_of(replace(capture.header, max_depth=max_depth), opts.max_dirs)
+    started = datetime.fromisoformat(capture.header.started)
+    baseline = _precheck(opts.dsn, key, started)
     clock = time.monotonic()
-    header, probes = replay_walk(capture, max_depth, opts.max_dirs)
-    return header, probes, time.monotonic() - clock
+    header, probes = replay_walk(
+        capture, max_depth, opts.max_dirs, should_list_changed(baseline, max_depth)
+    )
+    return _Walk(header, key, baseline, probes, time.monotonic() - clock)
 
 
 def _load(path: Path) -> Capture:
@@ -220,12 +291,19 @@ def _replay_backend(capture: Capture, max_depth: int) -> ReplayBackend:
         raise FatalError(f"{e}.") from e
 
 
-def _precheck(dsn: str, key: TreeKey) -> None:
-    """Raise FatalError unless the schema is current and tree KEY has no samples."""
+def _precheck(dsn: str, key: TreeKey, started: datetime | None = None) -> Baseline:
+    """Return tree KEY's baseline; raise FatalError unless a sample can be stored.
+
+    The schema must be current and, if STARTED (a replayed capture's, or for a
+    live sample the current time) is given, later than the tree's latest
+    sample. The connection is closed on return.
+    """
     with _database(dsn, NOTHING_STORED) as conn:
         check_schema(conn)
-        if has_samples(conn, key):
-            raise SamplesExist(key)
+        baseline = load_baseline(conn, key)
+        if started is not None:
+            check_order(baseline, key, started)
+    return baseline
 
 
 @contextlib.contextmanager
@@ -269,11 +347,18 @@ def _db_message(e: DbError, unchanged: str) -> str:
                 f"{SCHEMA_VERSION}. An administrator must migrate it, or "
                 f"{_DROP_AND_INIT}"
             )
-        case SamplesExist(key=key):
+        case ConcurrentSample(key=key):
             return (
-                f"the {describe_tree(key)} already has samples. This version of "
-                "trackdir stores only a tree's first sample; incremental "
-                "sampling is not implemented yet."
+                f"another sample of the {describe_tree(key)} was stored while this "
+                f"one ran; {NOTHING_STORED}. Run trackdir sample again."
+            )
+        case OutOfOrderSample(key=key, started=started, latest_started=latest):
+            return (
+                f"this sample started at {_utc(started)}, which is not later than "
+                f"the latest sample of the {describe_tree(key)} ({_utc(latest)}); "
+                f"{NOTHING_STORED}. A sample must start later than the tree's "
+                "latest sample: check the clocks of the hosts that sample this "
+                "tree, and for a replay use a newer capture."
             )
         case _:
             # psycopg's text can span lines and end in punctuation of its own.
@@ -284,9 +369,17 @@ def _db_message(e: DbError, unchanged: str) -> str:
 
 
 def describe_tree(key: TreeKey) -> str:
-    """Return "tree (cluster FSID, filesystem NAME, path PATH)" for KEY.
+    """Return "tree (cluster FSID, filesystem NAME, path PATH, depth N, max dirs M)".
 
     "default filesystem" stands in for a None fs_name.
     """
     fs = "default filesystem" if key.fs_name is None else f"filesystem {key.fs_name}"
-    return f"tree (cluster {key.cluster_fsid}, {fs}, path {os.fsdecode(key.fs_path)})"
+    return (
+        f"tree (cluster {key.cluster_fsid}, {fs}, path {os.fsdecode(key.fs_path)}, "
+        f"depth {key.max_depth}, max dirs {key.max_dirs})"
+    )
+
+
+def _utc(moment: datetime) -> str:
+    """Return MOMENT in ISO 8601 and UTC, as capture headers give it."""
+    return moment.astimezone(UTC).isoformat()

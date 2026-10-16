@@ -60,22 +60,27 @@ out of the repository; captures taken with the same key line up:
 {_exit_status("per-directory errors included", NO_CAPTURE)}"""
 
 SAMPLE_DESCRIPTION = f"""\
-Store the first sample of a tree in PostgreSQL: every directory under ROOT,
-down to --max-depth, with owner, mode, nlink, CephFS rstats and
-per-directory errors. With --replay, read the directories from a capture
-instead of CephFS. Only a tree's first sample is supported so far.
+Store a sample of a tree in PostgreSQL: the directories under ROOT, down to
+--max-depth, with owner, mode, nlink, CephFS rstats and per-directory errors.
+The first sample of a tree stores every directory. Later samples skip
+subtrees whose directory did not change and store only changed directories
+and deletions. With --replay, read the directories from a capture instead of
+CephFS.
 
 Read-only on ROOT; writes to the database given by --db or {sample.DSN_ENV}.
 The database schema must exist: run `trackdir db init` once.
 """
 
 SAMPLE_EPILOG = f"""\
-Run as root for a complete sample. As another user, directories you cannot
-read are stored as EACCES errors, without rstats.
+Run as root for a complete sample. As another user the sample is partial:
+directories you cannot read are stored as EACCES errors, without rstats, and
+later samples retry them.
 
 A tree is a directory of a CephFS filesystem, identified by the cluster fsid,
 the filesystem and the directory's path inside it, so it is the same tree
-whichever host or mount point samples it.
+whichever host or mount point samples it. --max-depth and --max-dirs are part
+of a tree's identity too: a run with another value of either is a different
+tree, and its first sample stores every directory again.
 
 DSN is a libpq connection string or URI, e.g.
 postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass
@@ -400,7 +405,7 @@ def _parser() -> argparse.ArgumentParser:
         commands,
         "sample",
         _prepare_sample,
-        help="store the first sample of the tree at ROOT in PostgreSQL",
+        help="store a sample of the tree at ROOT in PostgreSQL",
         description=SAMPLE_DESCRIPTION,
         epilog=SAMPLE_EPILOG,
     )

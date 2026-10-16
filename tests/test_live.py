@@ -7,6 +7,7 @@ from conftest import collapse
 from trackdir import live
 from trackdir.live import LiveRoot, open_live_root, walk_live, walk_within
 from trackdir.messages import FatalError
+from trackdir.model import ROOT
 from trackdir.mount import CephMount, MountError
 from trackdir.probe import LiveBackend
 from trackdir.rstats import RStatMode
@@ -120,3 +121,28 @@ def test_walk_within_reports_the_dir_limit(tree, fake_ceph):
     message = collapse(str(exc.value))
     assert message.startswith("ROOT has more than 2 directories within depth 2.")
     assert "--max-dirs" in message and "--max-depth" in message
+
+
+def test_walk_within_honors_a_custom_should_list(tree, fake_ceph):
+    with open_live_root(tree, print) as root:
+        backend = LiveBackend(root.safe_root, lambda fd: live.read_rstats(fd, None))
+        probes = walk_within(
+            backend,
+            max_depth=3,
+            max_dirs=100,
+            jobs=2,
+            should_list=lambda probe: probe.path == ROOT,
+        )
+    assert [p.path for p in probes] == [b".", b"a", b"z"]
+    assert probes[0].children is not None
+    assert probes[1].children is None  # within max depth, but not accepted
+
+
+def test_dir_limit_message_uses_the_given_advice(tree, fake_ceph):
+    with open_live_root(tree, print) as root:
+        backend = LiveBackend(root.safe_root, lambda fd: live.read_rstats(fd, None))
+        with pytest.raises(FatalError) as exc:
+            walk_within(backend, max_depth=2, max_dirs=2, jobs=2, limit_advice="X")
+    assert collapse(str(exc.value)) == (
+        "ROOT has more than 2 directories within depth 2. X"
+    )
