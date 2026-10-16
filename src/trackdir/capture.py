@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Self, get_args
 
 from trackdir.model import (
+    MAX_DEPTH_LIMIT,
     ROOT,
     DirProbe,
     ProbeError,
@@ -204,7 +205,7 @@ def _header_from_json(obj: object) -> CaptureHeader:
         value = getattr(header, field.name)
         if type(value) not in (get_args(field.type) or (field.type,)):
             raise CaptureFormatError(f"bad header: {field.name} {value!r}")
-    if header.max_depth < 0:
+    if not 0 <= header.max_depth <= MAX_DEPTH_LIMIT:
         raise CaptureFormatError(f"bad header: max_depth {header.max_depth!r}")
     if header.rstat_mode not in _RSTAT_MODES:
         raise CaptureFormatError(f"bad header: rstat_mode {header.rstat_mode!r}")

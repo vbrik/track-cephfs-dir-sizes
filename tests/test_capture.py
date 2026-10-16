@@ -146,6 +146,8 @@ EACCES = {"stage": "open", "code": "EACCES"}
         ([{"format": "other"}], "not a trackdir capture"),
         ([{**header_json(), "version": 1}], "version"),
         ([{**header_json(), "max_depth": "2"}], "bad header"),
+        ([{**header_json(), "max_depth": -1}], "bad header: max_depth"),
+        ([{**header_json(), "max_depth": 2**31}], "bad header: max_depth"),
         ([{**header_json(), "cluster_fsid": None}], "bad header"),
         ([{**header_json(), "fs_path": None}], "bad header"),
         ([{**header_json(), "fs_path": "x"}], "bad header"),

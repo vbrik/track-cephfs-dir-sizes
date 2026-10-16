@@ -12,6 +12,11 @@ from typing import Protocol
 
 ROOT = b"."
 
+# The largest --max-depth and --max-dirs: what PostgreSQL's integer and bigint
+# columns of a tree hold. Larger values would fail only at the store, after the walk.
+MAX_DEPTH_LIMIT = 2**31 - 1
+MAX_DIRS_LIMIT = 2**63 - 1
+
 # Error codes that are not errno names.
 DIRSTAT_STALE = "DIRSTAT_STALE"  # dirstat text older than the getxattr before it
 PARSE = "PARSE"  # an rstat value had an unexpected format

@@ -21,7 +21,7 @@ from trackdir.live import (
     walk_live,
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
-from trackdir.model import DirProbe, error_counts
+from trackdir.model import MAX_DEPTH_LIMIT, MAX_DIRS_LIMIT, DirProbe, error_counts
 from trackdir.rstats import RStatMode
 
 NO_CAPTURE = "no capture was written"  # what a failed capture leaves
@@ -350,8 +350,8 @@ def _warn(message: str) -> None:
     sys.stderr.write(paragraph(f"WARNING: {message}"))
 
 
-def _int_at_least(minimum: int) -> Callable[[str], int]:
-    """Return an argparse type for integers >= MINIMUM."""
+def _int_between(minimum: int, maximum: int | None = None) -> Callable[[str], int]:
+    """Return an argparse type for integers >= MINIMUM and, if given, <= MAXIMUM."""
 
     def parse(text: str) -> int:
         try:
@@ -360,6 +360,8 @@ def _int_at_least(minimum: int) -> Callable[[str], int]:
             raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
         if value < minimum:
             raise argparse.ArgumentTypeError(f"must be at least {minimum}: {value}")
+        if maximum is not None and value > maximum:
+            raise argparse.ArgumentTypeError(f"must be at most {maximum}: {value}")
         return value
 
     return parse
@@ -462,7 +464,7 @@ def _add_max_depth(
 ) -> None:
     parser.add_argument(
         "--max-depth",
-        type=_int_at_least(0),
+        type=_int_between(0, MAX_DEPTH_LIMIT),
         required=required,
         metavar="N",
         help=f"include directories at most N levels below ROOT (0: ROOT only){note}",
@@ -472,7 +474,7 @@ def _add_max_depth(
 def _add_max_dirs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-dirs",
-        type=_int_at_least(1),
+        type=_int_between(1, MAX_DIRS_LIMIT),
         default=DEFAULT_MAX_DIRS,
         metavar="N",
         help="fail if there are more than N directories (default: %(default)s)",
@@ -483,7 +485,7 @@ def _add_jobs(parser: argparse.ArgumentParser) -> None:
     # No argparse default, so a command can tell whether --jobs was given.
     parser.add_argument(
         "--jobs",
-        type=_int_at_least(1),
+        type=_int_between(1),
         metavar="N",
         help=f"directories probed concurrently (default: {DEFAULT_JOBS})",
     )

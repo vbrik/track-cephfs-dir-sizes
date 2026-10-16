@@ -317,6 +317,10 @@ def test_termination_signal_leaves_nothing(
         ["capture", "r", "--max-depth", "x", "-o", "o"],
         ["capture", "r", "--max-depth", "1", "-o", "o", "--jobs", "0"],
         ["capture", "r", "--max-depth", "1", "-o", "o", "--max-dirs", "0"],
+        ["capture", "r", "--max-depth", str(2**31), "-o", "o"],
+        ["capture", "r", "--max-depth", "1", "-o", "o", "--max-dirs", str(2**63)],
+        ["sample", "r", "--max-depth", str(2**31), "--db", "x"],
+        ["sample", "r", "--max-depth", "1", "--max-dirs", str(2**63), "--db", "x"],
         ["frobnicate"],
     ],
 )
