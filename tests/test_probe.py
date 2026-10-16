@@ -1,5 +1,6 @@
 import errno
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -127,12 +128,37 @@ def test_unreadable_dir_keeps_owner(tmp_path, backend):
     assert probe.children is None
 
 
-def test_nlink_two_means_no_subdirs_without_readdir(backend, monkeypatch):
+def test_nlink_two_means_no_subdirs_without_readdir(safe_root, monkeypatch):
     set_nlink(monkeypatch, 2)
     monkeypatch.setattr(
         probe_module, "_subdir_names", lambda fd: pytest.fail("readdir called")
     )
+    leaf_rstats = replace(FAKE_RSTATS, rsubdirs=1)
+    backend = LiveBackend(safe_root, lambda fd: leaf_rstats)
     assert backend.probe(ROOT, list_all).children == ()
+
+
+def test_nlink_two_with_subdirs_in_rstats_is_read(backend, monkeypatch):
+    set_nlink(monkeypatch, 2)
+    calls = []
+
+    def recorder(fd):
+        calls.append(fd)
+        return (b"x",)
+
+    monkeypatch.setattr(probe_module, "_subdir_names", recorder)
+    probe = backend.probe(ROOT, list_all)
+    assert len(calls) == 1
+    assert probe.children == (b"x",)
+
+
+def test_nlink_two_with_failed_rstats_still_skips_readdir(safe_root, monkeypatch):
+    set_nlink(monkeypatch, 2)
+    monkeypatch.setattr(
+        probe_module, "_subdir_names", lambda fd: pytest.fail("readdir called")
+    )
+    probe = LiveBackend(safe_root, failing_read_rstats).probe(ROOT, list_all)
+    assert probe.children == ()
 
 
 def test_nlink_one_as_on_btrfs_still_lists(tmp_path, backend, monkeypatch):

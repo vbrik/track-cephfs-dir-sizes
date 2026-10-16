@@ -11,6 +11,8 @@ from trackdir.safeopen import SafeRoot
 
 # CephFS and most local filesystems report a directory's nlink as 2 + subdirs,
 # so 2 means no subdirectories; btrfs reports 1, which falls through to readdir.
+# The shortcut is trusted only if rsubdirs (which counts the directory itself)
+# does not contradict it: a wrong empty listing would tombstone a subtree.
 NLINK_NO_SUBDIRS = 2
 
 
@@ -75,7 +77,7 @@ class LiveBackend:
             )
         if not should_list(probe):
             return probe
-        if probe.nlink == NLINK_NO_SUBDIRS:
+        if probe.nlink == NLINK_NO_SUBDIRS and probe.rsubdirs in (None, 1):
             return replace(probe, children=())
         try:
             children = _subdir_names(fd)
