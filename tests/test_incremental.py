@@ -14,10 +14,10 @@ from conftest import SUBTREE, collapse, edited_capture, must_not_walk
 
 from trackdir import sample
 from trackdir.baseline import ROW_COLUMNS, Row, row_of
-from trackdir.capture import Capture, load_capture
+from trackdir.capture import Capture, load_capture, write_capture
 from trackdir.cli import main
 from trackdir.messages import FatalError
-from trackdir.model import ROOT, path_depth, split
+from trackdir.model import ROOT, DirProbe, ProbeError, Stage, path_depth, split
 from trackdir.sample import SampleOptions, SampleResult, run_sample
 
 
@@ -177,6 +177,25 @@ def test_deleted_subtree_is_tombstoned_and_hidden(db, dsn, subtree, initial, tmp
     assert count(db, "dir_state", "sample_id = %s AND deleted", res.sample_id) == len(
         gone
     )
+
+
+def test_sample_after_the_whole_tree_was_deleted_is_initial(
+    db, dsn, subtree, initial, tmp_path
+):
+    gone = DirProbe(ROOT, error=ProbeError(Stage.OPEN, "ENOENT"))
+    path = tmp_path / "gone.jsonl.gz"
+    header = replace(subtree.header, started=later(subtree), finished=later(subtree))
+    write_capture(path, replace(header, dirs=1, errors=1), [gone])
+    deleted = replay(dsn, path)
+    assert (deleted.kind, deleted.deleted) == ("incremental", subtree.header.dirs)
+    assert view(db) == {}
+    back = edited_capture(
+        subtree, tmp_path / "back.jsonl.gz", started=later(subtree, 2)
+    )
+    recreated, second = replay(dsn, back), load_capture(back)
+    assert recreated.kind == "initial"
+    assert recreated.changed == second.header.dirs
+    assert view(db) == rows_of(second)
 
 
 def test_recreated_path_gets_an_ordinary_row(db, dsn, subtree, initial, tmp_path):

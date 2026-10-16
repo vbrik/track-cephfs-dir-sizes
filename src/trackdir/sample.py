@@ -1,7 +1,8 @@
 """trackdir sample and trackdir db init: store samples of a tree in PostgreSQL.
 
-A tree's first sample (initial) stores every directory; later ones
-(incremental) store only the directories whose state changed since the
+A sample against an empty baseline (initial: the tree's first, or the first
+after every directory was deleted) stores every directory; any other
+(incremental) stores only the directories whose state changed since the
 baseline, the tree's current state, and tombstones for deleted ones. Live
 samples and replays run the same steps, each with its own database connection
 or none: a pre-check (schema current, baseline loaded, a replay newer than
@@ -67,11 +68,12 @@ DB_UNCHANGED = "the database was not changed"
 _DROP_AND_INIT = (
     "drop schema trackdir, which deletes all stored samples, and run: trackdir db init"
 )
-# Ends the message of a walk over --max-dirs: raising it splits the history.
+# Ends the message of a walk over --max-dirs. The limit is part of the tree's
+# identity, so the only way past it forfeits the incremental baseline.
 SAMPLE_LIMIT_ADVICE = (
-    "--max-dirs and --max-depth are part of a tree's identity: a higher "
-    "--max-dirs or another --max-depth starts a new tree with a full initial "
-    "sample."
+    "Raising --max-dirs, or changing --max-depth, starts a new tree: a full "
+    "initial sample that leaves this tree's history behind. Do that only if "
+    "memory allows and you accept it."
 )
 
 
@@ -107,7 +109,7 @@ class SampleResult:
     walk_seconds: float
     store_seconds: float
     replayed_from: str | None  # absolute capture path; None for a live sample
-    kind: Literal["initial", "incremental"]  # initial: the tree had no sample
+    kind: Literal["initial", "incremental"]  # initial: nothing to compare with
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +157,7 @@ def replay_walk(
 def run_sample(opts: SampleOptions, warn: Callable[[str], None]) -> SampleResult:
     """Store a sample of the tree at opts.root or in opts.replay.
 
-    The sample is initial if the tree has none yet, else incremental. Calls
+    The sample is initial if the tree's baseline is empty, else incremental. Calls
     WARN once per degraded mode of a live ROOT, before walking. Raises
     FatalError, before walking if the database cannot take the sample;
     KeyboardInterrupt propagates. A sample is stored only if this returns.
@@ -186,7 +188,7 @@ def run_sample(opts: SampleOptions, warn: Callable[[str], None]) -> SampleResult
         walk_seconds=walked.seconds,
         store_seconds=time.monotonic() - clock,
         replayed_from=replayed_from,
-        kind="initial" if baseline.sample_id is None else "incremental",
+        kind="incremental" if baseline.rows else "initial",
     )
 
 
@@ -291,18 +293,17 @@ def _replay_backend(capture: Capture, max_depth: int) -> ReplayBackend:
         raise FatalError(f"{e}.") from e
 
 
-def _precheck(dsn: str, key: TreeKey, started: datetime | None = None) -> Baseline:
+def _precheck(dsn: str, key: TreeKey, started: datetime) -> Baseline:
     """Return tree KEY's baseline; raise FatalError unless a sample can be stored.
 
-    The schema must be current and, if STARTED (a replayed capture's, or for a
-    live sample the current time) is given, later than the tree's latest
-    sample. The connection is closed on return.
+    The schema must be current and STARTED (a replayed capture's, or for a live
+    sample the current time) later than the tree's latest sample. The
+    connection is closed on return.
     """
     with _database(dsn, NOTHING_STORED) as conn:
         check_schema(conn)
         baseline = load_baseline(conn, key)
-        if started is not None:
-            check_order(baseline, key, started)
+        check_order(baseline, key, started)
     return baseline
 
 

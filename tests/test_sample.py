@@ -64,7 +64,8 @@ def test_replay_walk_with_a_should_list_reads_only_what_it_accepts(subtree):
 def test_dir_limit_message_names_the_tree_consequence(subtree):
     with pytest.raises(FatalError) as exc:
         replay_walk(subtree, 2, max_dirs=1)
-    assert "part of a tree's identity" in collapse(str(exc.value))
+    message = collapse(str(exc.value))
+    assert "starts a new tree" in message and "leaves this tree's history" in message
 
 
 def test_replay_walk_at_smaller_depth(subtree):

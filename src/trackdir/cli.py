@@ -62,10 +62,10 @@ out of the repository; captures taken with the same key line up:
 SAMPLE_DESCRIPTION = f"""\
 Store a sample of a tree in PostgreSQL: the directories under ROOT, down to
 --max-depth, with owner, mode, nlink, CephFS rstats and per-directory errors.
-The first sample of a tree stores every directory. Later samples skip
-subtrees whose directory did not change and store only changed directories
-and deletions. With --replay, read the directories from a capture instead of
-CephFS.
+A sample with nothing to compare against (a tree's first) stores every
+directory. Later samples skip subtrees whose directory did not change and
+store only changed directories and deletions. With --replay, read the
+directories from a capture instead of CephFS.
 
 Read-only on ROOT; writes to the database given by --db or {sample.DSN_ENV}.
 The database schema must exist: run `trackdir db init` once.
