@@ -152,13 +152,13 @@ def test_nlink_two_with_subdirs_in_rstats_is_read(backend, monkeypatch):
     assert probe.children == (b"x",)
 
 
-def test_nlink_two_with_failed_rstats_still_skips_readdir(safe_root, monkeypatch):
+def test_nlink_two_with_failed_rstats_is_not_trusted(tmp_path, safe_root, monkeypatch):
+    # Without rsubdirs nothing confirms the nlink shortcut, so the directory is read.
+    (tmp_path / "a").mkdir()
     set_nlink(monkeypatch, 2)
-    monkeypatch.setattr(
-        probe_module, "_subdir_names", lambda fd: pytest.fail("readdir called")
-    )
     probe = LiveBackend(safe_root, failing_read_rstats).probe(ROOT, list_all)
-    assert probe.children == ()
+    assert probe.children == (b"a",)
+    assert probe.error.stage == Stage.RSTATS
 
 
 def test_nlink_one_as_on_btrfs_still_lists(tmp_path, backend, monkeypatch):
