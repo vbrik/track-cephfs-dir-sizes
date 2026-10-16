@@ -12,15 +12,13 @@ the baseline; the store, in one transaction that fails if another sample was
 stored meanwhile.
 """
 
-import contextlib
-import os
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from trackdir.baseline import Baseline, diff, should_list_changed
 from trackdir.capture import (
@@ -32,21 +30,15 @@ from trackdir.capture import (
 )
 from trackdir.db import (
     SCHEMA_VERSION,
-    ConcurrentSample,
-    DbError,
-    OutOfOrderSample,
-    PsycopgMissing,
-    SchemaMissing,
-    SchemaVersionMismatch,
     TreeKey,
     check_order,
     check_schema,
-    connect,
     init_schema,
     load_baseline,
     store_sample,
     tree_key_of,
 )
+from trackdir.dbcli import DB_UNCHANGED, NOTHING_STORED, database, describe_tree
 from trackdir.live import (
     DEFAULT_JOBS,
     DEFAULT_MAX_DIRS,
@@ -57,17 +49,6 @@ from trackdir.live import (
 from trackdir.messages import FatalError, describe_errors, paragraph
 from trackdir.model import DirProbe, ShouldList, error_counts
 
-if TYPE_CHECKING:
-    import psycopg
-
-DSN_ENV = "TRACKDIR_DB"  # environment variable with the DSN when --db is absent
-# What a failed or interrupted command leaves, as a lowercase clause.
-NOTHING_STORED = "nothing was stored"
-DB_UNCHANGED = "the database was not changed"
-# Next step for a schema this trackdir cannot use; ends the message.
-_DROP_AND_INIT = (
-    "drop schema trackdir, which deletes all stored samples, and run: trackdir db init"
-)
 # Ends the message of a walk over --max-dirs. The limit is part of the tree's
 # identity, so the only way past it forfeits the incremental baseline.
 SAMPLE_LIMIT_ADVICE = (
@@ -171,7 +152,7 @@ def run_sample(opts: SampleOptions, warn: Callable[[str], None]) -> SampleResult
     header, baseline = walked.header, walked.baseline
     sample_diff = diff(baseline, walked.probes, header.max_depth)
     clock = time.monotonic()
-    with _database(opts.dsn, NOTHING_STORED) as conn:
+    with database(opts.dsn, NOTHING_STORED) as conn:
         sample_id = store_sample(
             conn, header, walked.key, baseline, sample_diff, replayed_from
         )
@@ -219,7 +200,7 @@ def run_db_init(dsn: str) -> bool:
 
     Returns False if it already exists at SCHEMA_VERSION. Raises FatalError.
     """
-    with _database(dsn, DB_UNCHANGED) as conn:
+    with database(dsn, DB_UNCHANGED) as conn:
         return init_schema(conn)
 
 
@@ -300,87 +281,8 @@ def _precheck(dsn: str, key: TreeKey, started: datetime) -> Baseline:
     sample the current time) later than the tree's latest sample. The
     connection is closed on return.
     """
-    with _database(dsn, NOTHING_STORED) as conn:
+    with database(dsn, NOTHING_STORED) as conn:
         check_schema(conn)
         baseline = load_baseline(conn, key)
         check_order(baseline, key, started)
     return baseline
-
-
-@contextlib.contextmanager
-def _database(dsn: str, unchanged: str) -> Iterator["psycopg.Connection"]:
-    """Connect to DSN, yield the connection and close it; DbError becomes FatalError.
-
-    UNCHANGED is what a database error leaves, e.g. NOTHING_STORED.
-    """
-    try:
-        with connect(dsn) as conn:
-            yield conn
-    except DbError as e:
-        raise FatalError(_db_message(e, unchanged)) from e
-
-
-def _db_message(e: DbError, unchanged: str) -> str:
-    """Return the FatalError message for E: what failed and what to do.
-
-    UNCHANGED ends the message of an unexpected database error.
-    """
-    match e:
-        case PsycopgMissing():
-            return (
-                "the PostgreSQL driver psycopg is not installed. Install it with: "
-                "pip install 'trackdir[postgres]'"
-            )
-        case SchemaMissing():
-            return (
-                "the database has no trackdir schema. Create it with: trackdir db init"
-            )
-        case SchemaVersionMismatch(found=None):
-            return (
-                "the database's trackdir schema is incomplete (no version "
-                f"recorded), but this trackdir needs version {SCHEMA_VERSION}. "
-                f"An administrator must {_DROP_AND_INIT}"
-            )
-        case SchemaVersionMismatch(found=found):
-            return (
-                f"the database's trackdir schema is version {found}, from "
-                f"another trackdir version, but this trackdir needs version "
-                f"{SCHEMA_VERSION}. An administrator must migrate it, or "
-                f"{_DROP_AND_INIT}"
-            )
-        case ConcurrentSample(key=key):
-            return (
-                f"another sample of the {describe_tree(key)} was stored while this "
-                f"one ran; {NOTHING_STORED}. Run trackdir sample again."
-            )
-        case OutOfOrderSample(key=key, started=started, latest_started=latest):
-            return (
-                f"this sample started at {_utc(started)}, which is not later than "
-                f"the latest sample of the {describe_tree(key)} ({_utc(latest)}); "
-                f"{NOTHING_STORED}. A sample must start later than the tree's "
-                "latest sample: check the clocks of the hosts that sample this "
-                "tree, and for a replay use a newer capture."
-            )
-        case _:
-            # psycopg's text can span lines and end in punctuation of its own.
-            detail = " ".join(str(e).split())
-            if not detail.endswith((".", "?", "!")):
-                detail += "."
-            return f"database error: {detail} {unchanged[0].upper()}{unchanged[1:]}."
-
-
-def describe_tree(key: TreeKey) -> str:
-    """Return "tree (cluster FSID, filesystem NAME, path PATH, depth N, max dirs M)".
-
-    "default filesystem" stands in for a None fs_name.
-    """
-    fs = "default filesystem" if key.fs_name is None else f"filesystem {key.fs_name}"
-    return (
-        f"tree (cluster {key.cluster_fsid}, {fs}, path {os.fsdecode(key.fs_path)}, "
-        f"depth {key.max_depth}, max dirs {key.max_dirs})"
-    )
-
-
-def _utc(moment: datetime) -> str:
-    """Return MOMENT in ISO 8601 and UTC, as capture headers give it."""
-    return moment.astimezone(UTC).isoformat()

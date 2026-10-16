@@ -1,6 +1,7 @@
 import os
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from trackdir.model import ROOT, DirProbe, RStats, path_depth, split, tree_key
 from trackdir.mount import CephMount
 from trackdir.rstats import RStatMode
 from trackdir.safeopen import SafeRoot, openat2_supported
+from trackdir.sample import SampleOptions, SampleResult, run_sample
 
 # Anonymized capture of a real CephFS tree: ~72k dirs, depth 4, 41 open EACCES.
 SUBTREE = Path(__file__).parent / "data" / "ceph1-sub-depth4.jsonl.gz"
@@ -193,3 +195,13 @@ def edited_capture(
     )
     write_capture(out, header, ordered)
     return out
+
+
+def replay(dsn: str, capture: Path, **options) -> SampleResult:
+    return run_sample(SampleOptions(dsn=dsn, replay=capture, **options), print)
+
+
+def later(capture: Capture, hours: float = 1) -> str:
+    """Return the start time HOURS after CAPTURE's."""
+    started = datetime.fromisoformat(capture.header.started)
+    return (started + timedelta(hours=hours)).isoformat()

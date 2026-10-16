@@ -6,11 +6,10 @@ database. All need TRACKDIR_TEST_DSN (the db fixture) and psycopg.
 """
 
 from dataclasses import replace
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import SUBTREE, collapse, edited_capture, must_not_walk
+from conftest import SUBTREE, collapse, edited_capture, later, must_not_walk, replay
 
 from trackdir import sample
 from trackdir.baseline import ROW_COLUMNS, Row, row_of
@@ -18,7 +17,7 @@ from trackdir.capture import Capture, load_capture, write_capture
 from trackdir.cli import main
 from trackdir.messages import FatalError
 from trackdir.model import ROOT, DirProbe, ProbeError, Stage, path_depth, split
-from trackdir.sample import SampleOptions, SampleResult, run_sample
+from trackdir.sample import SampleResult
 
 
 @pytest.fixture
@@ -41,16 +40,6 @@ def walks(monkeypatch) -> list[set[bytes]]:
 
     monkeypatch.setattr(sample, "replay_walk", spy)
     return seen
-
-
-def replay(dsn: str, capture: Path, **options) -> SampleResult:
-    return run_sample(SampleOptions(dsn=dsn, replay=capture, **options), print)
-
-
-def later(capture: Capture, hours: float = 1) -> str:
-    """Return the start time HOURS after CAPTURE's."""
-    started = datetime.fromisoformat(capture.header.started)
-    return (started + timedelta(hours=hours)).isoformat()
 
 
 def sample_edit(

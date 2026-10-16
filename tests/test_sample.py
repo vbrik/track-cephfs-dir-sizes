@@ -8,7 +8,7 @@ from datetime import datetime
 import pytest
 from conftest import SUBTREE, collapse, must_not_walk
 
-from trackdir import live, sample
+from trackdir import dbcli, live, sample
 from trackdir.cli import main
 from trackdir.db import (
     ConcurrentSample,
@@ -18,12 +18,12 @@ from trackdir.db import (
     TreeKey,
     tree_key_of,
 )
+from trackdir.dbcli import describe_tree
 from trackdir.messages import FatalError
 from trackdir.model import ROOT, error_counts
 from trackdir.sample import (
     SampleOptions,
     SampleResult,
-    describe_tree,
     render_sample_summary,
     replay_walk,
     run_sample,
@@ -35,7 +35,7 @@ UNREACHABLE = "postgresql://trackdir@127.0.0.1:1/x_test"
 @pytest.fixture(autouse=True)
 def no_dsn_in_environment(monkeypatch):
     """Keep the developer's TRACKDIR_DB out of the tests."""
-    monkeypatch.delenv(sample.DSN_ENV, raising=False)
+    monkeypatch.delenv(dbcli.DSN_ENV, raising=False)
 
 
 def without_children(probes):
@@ -251,7 +251,7 @@ def test_conflicts_name_the_tree_as_the_summary_does(
     subtree, monkeypatch, fs_name, conflict, text
 ):
     key = replace(tree_key_of(subtree.header, 10**6), fs_name=fs_name)
-    monkeypatch.setattr(sample, "connect", fail_to_connect(conflict(key)))
+    monkeypatch.setattr(dbcli, "connect", fail_to_connect(conflict(key)))
     with pytest.raises(FatalError) as exc:
         run_sample(SampleOptions(dsn="x", replay=SUBTREE), print)
     tree = describe_tree(key)
@@ -274,7 +274,7 @@ def fail_to_connect(error):
     ],
 )
 def test_database_error_says_what_was_left(monkeypatch, capsys, args, outcome):
-    monkeypatch.setattr(sample, "connect", fail_to_connect(DbError("boom")))
+    monkeypatch.setattr(dbcli, "connect", fail_to_connect(DbError("boom")))
     assert main(args) == 1
     assert (
         collapse(capsys.readouterr().err) == f"ERROR: database error: boom. {outcome}"
@@ -287,7 +287,7 @@ def test_database_error_says_what_was_left(monkeypatch, capsys, args, outcome):
 )
 def test_schema_version_mismatch_says_what_to_do(monkeypatch, capsys, found, next_step):
     error = SchemaVersionMismatch(found)
-    monkeypatch.setattr(sample, "connect", fail_to_connect(error))
+    monkeypatch.setattr(dbcli, "connect", fail_to_connect(error))
     assert main(["db", "init", "--db", "x"]) == 1
     err = collapse(capsys.readouterr().err)
     assert err.count("ERROR:") == 1

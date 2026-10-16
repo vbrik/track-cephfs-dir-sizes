@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from trackdir import __version__, sample
+from trackdir import __version__, dbcli, sample
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
 from trackdir.live import (
@@ -27,13 +27,14 @@ from trackdir.rstats import RStatMode
 NO_CAPTURE = "no capture was written"  # what a failed capture leaves
 
 
-def _exit_status(success: str, unchanged: str) -> str:
+def _exit_status(unchanged: str, success: str = "") -> str:
     """Return the epilog paragraph on exit statuses, shared by all commands.
 
-    SUCCESS qualifies status 0; UNCHANGED is what every other status leaves.
+    UNCHANGED is what every status but 0 leaves; SUCCESS, if any, qualifies 0.
     """
+    qualifier = f" ({success})" if success else ""
     return paragraph(
-        f"Exit status: 0 success ({success}), 1 error, 2 usage error, "
+        f"Exit status: 0 success{qualifier}, 1 error, 2 usage error, "
         "130 interrupted, 128+N on signal N (SIGTERM or SIGHUP). On a non-zero "
         f"status, {unchanged}."
     )
@@ -57,7 +58,7 @@ read are recorded as EACCES errors, without rstats.
 out of the repository; captures taken with the same key line up:
   {key_recipe("trackdir.key")}
 
-{_exit_status("per-directory errors included", NO_CAPTURE)}"""
+{_exit_status(NO_CAPTURE, "per-directory errors included")}"""
 
 SAMPLE_DESCRIPTION = f"""\
 Store a sample of a tree in PostgreSQL: the directories under ROOT, down to
@@ -67,7 +68,7 @@ directory. Later samples skip subtrees whose directory did not change and
 store only changed directories and deletions. With --replay, read the
 directories from a capture instead of CephFS.
 
-Read-only on ROOT; writes to the database given by --db or {sample.DSN_ENV}.
+Read-only on ROOT; writes to the database given by --db or {dbcli.DSN_ENV}.
 The database schema must exist: run `trackdir db init` once.
 """
 
@@ -86,16 +87,14 @@ DSN is a libpq connection string or URI, e.g.
 postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass
 or PGPASSWORD, never in --db: ps shows command lines to every local user.
 
-{_exit_status("per-directory errors included", sample.NOTHING_STORED)}"""
+{_exit_status(dbcli.NOTHING_STORED, "per-directory errors included")}"""
 
 DB_INIT_DESCRIPTION = f"""\
-Create trackdir's tables in the database given by --db or {sample.DSN_ENV}.
+Create trackdir's tables in the database given by --db or {dbcli.DSN_ENV}.
 Changes the database; safe to repeat.
 """
 
-DB_INIT_EPILOG = _exit_status(
-    "also when the schema already exists", sample.DB_UNCHANGED
-)
+DB_INIT_EPILOG = _exit_status(dbcli.DB_UNCHANGED, "also when the schema already exists")
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +232,7 @@ def _prepare_sample(args: argparse.Namespace) -> _Command:
     )
     return _Command(
         lambda: sample.render_sample_summary(sample.run_sample(opts, _warn)),
-        sample.NOTHING_STORED,
+        dbcli.NOTHING_STORED,
     )
 
 
@@ -241,7 +240,7 @@ def _prepare_db_init(args: argparse.Namespace) -> _Command:
     dsn = _dsn(args)
     return _Command(
         lambda: sample.render_db_init(sample.run_db_init(dsn)),
-        sample.DB_UNCHANGED,
+        dbcli.DB_UNCHANGED,
     )
 
 
@@ -251,9 +250,9 @@ def _jobs(args: argparse.Namespace) -> int:
 
 def _dsn(args: argparse.Namespace) -> str:
     """Return --db, else $TRACKDIR_DB; exits with a usage error if neither is set."""
-    dsn = args.db or os.environ.get(sample.DSN_ENV)
+    dsn = args.db or os.environ.get(dbcli.DSN_ENV)
     if not dsn:
-        args.parser.error(f"no database given: pass --db DSN or set {sample.DSN_ENV}")
+        args.parser.error(f"no database given: pass --db DSN or set {dbcli.DSN_ENV}")
     return dsn
 
 
@@ -495,5 +494,5 @@ def _add_db(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
         metavar="DSN",
-        help=f"PostgreSQL connection string (default: ${sample.DSN_ENV})",
+        help=f"PostgreSQL connection string (default: ${dbcli.DSN_ENV})",
     )

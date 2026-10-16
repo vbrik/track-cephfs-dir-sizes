@@ -21,7 +21,7 @@
 - `walk_within` alone enforces the depth limit: no directory at max depth is
   listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);
-  `sample.py` turns them into `FatalError` messages, in one place.
+  `dbcli.py` turns them into `FatalError` messages, in one place.
 - Tests need neither Ceph nor root. Real CephFS data enters tests only as
   anonymized captures in `tests/data/`.
 - The development database is the podman container `trackdir-postgres`,
