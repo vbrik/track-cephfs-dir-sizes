@@ -27,3 +27,13 @@
   `TRACKDIR_TEST_DSN` (the `db` fixture) and are skipped without it; they
   refuse a database whose name does not end in `_test`.
   `tests/test_postgres_script.py` tests the script against a stub `podman`.
+- `trackdir.dir_state` rows are stored changes, not a listing: a sample stores a
+  directory only if its row differs from the baseline, plus tombstones
+  (`deleted` rows with every value NULL) for deleted paths. Read a tree's state
+  through `trackdir.current_dir_state`, never by taking the rows of one sample.
+- A tree's latest sample is the one with the greatest `(started, id)`, in the
+  baseline, the view, the order guard and the stale-baseline check alike. A sample
+  must start later than the latest one, so this is also the greatest `id`.
+- A path that is not in the view is deleted or never stored; unchanged
+  directories carry no row in newer samples, so absence from a sample means
+  nothing.

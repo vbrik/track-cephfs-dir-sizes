@@ -3,6 +3,17 @@
 Date: 2026-10-16. Status: approved by the user on 2026-10-16; next step is
 the implementation plan.
 
+Amended 2026-10-16 by the
+[incremental-sample design](2026-10-16-trackdir-incremental-sample-design.md):
+a tree's identity now also includes `max_depth` and `max_dirs` (another value
+is another tree with its own initial sample); the current-state view is
+revisited (it hides tombstoned paths, and "latest" means the greatest
+`(started, id)`); `SamplesExist` and the refusal of a second sample are replaced
+by incremental samples and by order and stale-baseline guards; the schema is
+version 2 (`tree.max_depth`, `tree.max_dirs`, `sample.changed`, `sample.deleted`,
+`dir_state.deleted`), and `dir_state` rows are stored changes, not one row per
+directory. `TreeKey`, `tree_key_of` and `describe_tree` carry the two new fields.
+
 ## 1. Goal and scope
 
 trackdir's sampler will record, at intervals, the directories whose state

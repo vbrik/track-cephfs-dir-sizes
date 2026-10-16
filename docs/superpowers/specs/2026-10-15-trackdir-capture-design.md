@@ -9,6 +9,18 @@ capture format is version 2, whose header makes `cluster_fsid` required and
 adds `fs_name` and `fs_path`, and capture now fails when ROOT's identity (cluster fsid and
 CephFS mount) cannot be determined.
 
+Amended 2026-10-16 by the
+[incremental-sample design](2026-10-16-trackdir-incremental-sample-design.md),
+which settles the open items of section 14: a directory is stored when its row
+differs from its last known row in any stored column (no separate "monitored"
+set; a directory is unchanged, and so prunable, only if its whole row (ino,
+mode, uid, gid, nlink, rctime, rbytes, rfiles, rsubdirs, error) equals its
+baseline row); deletions are recorded as tombstone rows, one per
+deleted directory and baseline descendant; directories with an error, and their
+ancestors, are never pruned, so errors are retried. The item "any rctime in the
+future acts as pinned" is dropped: no pinned rule is needed (a same-size rewrite
+under a pinned directory stays invisible, a documented limit).
+
 ## 1. Goal and scope
 
 `trackdir` will track how CephFS directory sizes change over time: a sampler

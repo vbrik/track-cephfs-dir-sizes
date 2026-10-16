@@ -19,10 +19,16 @@
 | capture | A file with one probe result per directory of the tracked space, for offline use. |
 | replay | Serving a capture to the walker instead of a live filesystem. |
 | anonymized capture | A capture whose names, uids, gids, cluster fsid, fs name and fs path are replaced by HMAC tokens. |
-| tree | A directory of a CephFS filesystem, identified by (cluster fsid, fs name, fs path); the same on every host and mount point. Samples belong to a tree. |
+| tree | A directory of a CephFS filesystem sampled to a given depth, identified by (cluster fsid, fs name, fs path, `max_depth`, `max_dirs`); the same on every host and mount point. Samples belong to a tree. The same ROOT with another `max_depth` or `max_dirs` is another tree. |
 | filesystem path (`fs_path`) | ROOT's absolute path inside its CephFS filesystem; `/` is the filesystem's root. Unlike ROOT, it does not depend on where the filesystem is mounted. |
 | fs name (`fs_name`) | The CephFS filesystem's name, as the mount names it; NULL (None) means the cluster's default filesystem. |
-| sample | The state of a tree's directories at one time, stored in PostgreSQL. Later samples will record only the directories that changed since their last known state. |
-| initial sample | A tree's first sample: every directory of the tracked space. The only kind `trackdir sample` stores so far. |
-| dir state | One directory's row in a sample (`trackdir.dir_state`): owner, mode, nlink, rstats or its error. |
-| current state | Each directory's latest dir state across a tree's samples (view `trackdir.current_dir_state`). |
+| sample | One run of `trackdir sample`, stored in PostgreSQL: the directories of a tree whose state changed since the baseline (the first sample of a tree: all of them), and its deletions. |
+| initial sample | A tree's first sample: every directory of the tracked space; the baseline is empty, so nothing is pruned. |
+| incremental sample | Any later sample of a tree: it prunes the walk with the baseline and stores only changed directories and tombstones. |
+| baseline | A tree's current state read from the database before a sample's walk: each directory's last known row, possibly many samples old, plus the retry set. |
+| dir state | One directory's row in a sample (`trackdir.dir_state`): owner, mode, nlink, rstats or its error. It is stored only if the directory changed (or is a tombstone), so a sample holds a subset of the tree. |
+| current state | Each directory's latest dir state across a tree's samples, by `(started, id)` of the sample, without tombstoned paths (view `trackdir.current_dir_state`). |
+| unchanged | A probed directory whose row equals its baseline row in every dir state column. Unless it is in the retry set, its children are not listed. |
+| skipped (pruned) subtree | An unchanged directory above max depth and outside the retry set, whose children the walk did not read. |
+| tombstone | A dir state row with `deleted` true and no other values: the path was deleted. Every deleted directory gets one, including each of its baseline descendants. A path created again later gets an ordinary row. |
+| retry set | The paths with an error row in the baseline plus all their ancestors; they are listed even if unchanged, so errors are retried by every sample. |

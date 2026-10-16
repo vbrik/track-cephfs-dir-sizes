@@ -5,9 +5,10 @@ over time. It reads CephFS recursive statistics (`ceph.dir.rbytes`,
 `rfiles`, `rsubdirs`, `rctime`), so the size of a whole subtree costs one
 metadata request instead of a full scan.
 
-Status: `trackdir capture` works, and `trackdir sample` stores a tree's first
-sample in PostgreSQL. Later samples, which record only what changed, are
-planned.
+Status: `trackdir capture` works, and `trackdir sample` stores samples of a
+tree in PostgreSQL: the first one holds every directory, later ones only what
+changed. Readers of the database (reports, queries by size growth) are not
+written yet.
 
 ## Requirements
 
@@ -65,26 +66,90 @@ with `zcat FILE | jq`.
 
     export TRACKDIR_DB=postgresql://trackdir@db.example.org/trackdir
     trackdir db init                                     # once per database
-    trackdir sample /mnt/cephfs/projects --max-depth 3
+    trackdir sample /mnt/cephfs/projects --max-depth 3   # run it again and again
     trackdir sample --replay projects.jsonl.gz           # from a capture
 
-`db init` creates the tables in schema `trackdir`; repeating it changes
-nothing. `sample` stores every directory under ROOT down to `--max-depth`,
-read as `capture` reads it, as the first sample of ROOT's tree. A tree is a
-directory of a CephFS filesystem: cluster fsid, filesystem name and path inside
-the filesystem, the same whichever host or mount point samples it. A tree that
-already has a sample is refused before walking; later samples are not
-implemented yet. `sample` is read-only on ROOT, holds no database connection
-during the walk, and stores the sample in one transaction, so a failed or
-interrupted run stores nothing. Run it as root for a complete sample.
+`db init` creates the tables in schema `trackdir` (schema version 2); repeating
+it changes nothing. A version-1 database is refused: drop schema `trackdir` and
+run `db init` again (there is no migration).
+
+`sample` reads ROOT's directories down to `--max-depth`, as `capture` does, and
+stores them as a sample of ROOT's tree. A tree is a directory of a CephFS
+filesystem: cluster fsid, filesystem name, path inside the filesystem, and the
+`--max-depth` and `--max-dirs` the sample ran with. It is the same whichever
+host or mount point samples it.
+
+- **Initial sample.** A tree with no samples gets one that stores every
+  directory.
+- **Incremental sample.** Otherwise `sample` loads the tree's current state (its
+  baseline) from the database, and lists a directory's children only if the
+  directory differs from the baseline in some stored column (ino, mode, uid,
+  gid, nlink, rctime, rbytes, rfiles, rsubdirs or error), or if it is an error
+  directory or an ancestor of one (the retry set: errors are retried by every
+  sample). CephFS rstats cover a whole subtree, so otherwise an unchanged
+  directory means an unchanged subtree, which is skipped without being read.
+  The sample stores only the directories that changed (new ones included) and
+  one deletion record (tombstone) for every directory that disappeared, with its
+  former descendants.
+  Unchanged directories store nothing, so `trackdir.dir_state` holds changes,
+  not a listing; `trackdir.current_dir_state` (a view) gives each directory's
+  latest state, without deleted ones.
+
+The summary on stderr says which kind it was, e.g. (placeholders):
+
+    Stored sample 7 (incremental): probed 1204 directories under ROOT to depth
+    4, tree (...); 18 changed, 2 deleted, 31 unchanged subtrees skipped; 41 had
+    errors: open EACCES 41. Walk 3.2 s, store 0.1 s.
+
+"Probed" counts the directories read, including every one on the way to a
+change. "N had errors" counts probed directories with an error, not new ones:
+the unreadable directories of a non-root run (below) are probed again by every
+sample, so they are in that number every time. "Unchanged subtrees skipped" are
+directories above max depth that were not listed.
+
+`--max-depth` and `--max-dirs` are part of the tree's identity. A run with
+another value of either is a different tree: it takes a full initial sample and
+never sees the other tree's baseline. There is no way to deepen a tree, and
+one ROOT sampled at two depths is stored twice, with nothing linking the
+copies; readers of the database must pick a tree. `--max-dirs` is a memory
+guard for a run, but it counts too, so if a large reorganization pushes a run
+over it, raising it starts a new tree.
+
+Run `sample` as root for a complete sample. As another user it is partial:
+directories you cannot read are stored as errors (EACCES) without rstats. Their
+ancestors are never pruned, so every later sample reads those directories again,
+and a later root sample replaces the errors with real rows. Until then,
+anyone reading the current state sees the errors.
+
+`sample` is read-only on ROOT, holds no database connection during the walk,
+and stores in one transaction, so a failed or interrupted run stores nothing.
+It refuses a sample if another one was stored for the tree during the walk, and
+a sample that did not start after the tree's latest sample (the view orders by
+`started`); a replayed capture must therefore be newer than the tree's last
+sample.
 
 `--replay CAPTURE` stores a capture instead of reading CephFS, keeping the
-capture's times and provenance; `--max-depth` then defaults to the capture's
-and may be smaller.
+capture's times and provenance; it prunes with the baseline as a live run would.
+`--max-depth` then defaults to the capture's and may be smaller.
 
 The database comes from `--db DSN` or `TRACKDIR_DB`, as a libpq connection
 string or URI. Put the password in `~/.pgpass` or `PGPASSWORD`, never in
 `--db`: `ps` shows command lines to every local user.
+
+### Limits of incremental samples
+
+- CephFS propagates rstats up the tree with a delay, so a change can be
+  invisible at a parent for a while. The next sample sees it: a change is
+  delayed, not lost.
+- A pinned rctime (in the future, often `4294967295`) never changes again, so
+  a same-size rewrite under such a directory keeps all four rstats equal and is
+  not seen. A change in size, file count or directory count is.
+- A rename is a deletion plus a creation; the inode number is stored but not
+  used.
+- The baseline is held in memory, for all current directories of the tree:
+  about 0.5 GB retained, and up to about 1.6 GB at peak while loading, per
+  million current directories. The default `--max-dirs` is 1,000,000, so large
+  trees need RAM accordingly.
 
 ## Development
 
@@ -130,3 +195,4 @@ The script touches only the container `trackdir-postgres` and the volume
 - [docs/conventions.md](docs/conventions.md): project conventions.
 - [Design of capture](docs/superpowers/specs/2026-10-15-trackdir-capture-design.md).
 - [Design of the initial sample](docs/superpowers/specs/2026-10-16-trackdir-initial-sample-design.md).
+- [Design of incremental samples](docs/superpowers/specs/2026-10-16-trackdir-incremental-sample-design.md).
