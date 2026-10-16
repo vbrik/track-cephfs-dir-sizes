@@ -22,12 +22,16 @@ if TYPE_CHECKING:
     import psycopg
 
 SCHEMA = "trackdir"  # the DDL and queries fix this name; it is not a setting
-SCHEMA_VERSION = 2  # of DDL; no migrations exist, a mismatch is fatal
+SCHEMA_VERSION = 3  # of DDL; no migrations exist, a mismatch is fatal
 
 # The initial-sample spec's section 5 as amended by section 4 of the
 # incremental-sample spec. dir_state holds the rows a sample stored because they
 # changed (tombstones included), not a full listing; current_dir_state is each
-# path's latest row of a tree, hiding deleted paths.
+# path's latest row of a tree, hiding deleted paths. Because a sample's rows are
+# not a listing, a sample cannot be deleted on its own: dir_state's foreign key
+# to sample does not cascade, so deleting a sample that has rows fails. A tree is
+# removed by deleting its dir_state rows, then its samples, then the tree row.
+# What a sample stored is counted from its dir_state rows, not kept redundantly.
 DDL = """\
 CREATE SCHEMA trackdir;
 
@@ -49,7 +53,6 @@ CREATE TABLE trackdir.sample (
     id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tree_id          bigint      NOT NULL REFERENCES trackdir.tree,
     root             bytea       NOT NULL,  -- ROOT's resolved local path
-    max_depth        integer     NOT NULL CHECK (max_depth >= 0),
     rstat_mode       text        NOT NULL CHECK (rstat_mode IN ('dirstat', 'getxattr')),
     openat2          boolean     NOT NULL,
     jobs             integer     NOT NULL,
@@ -61,15 +64,13 @@ CREATE TABLE trackdir.sample (
     trackdir_version text        NOT NULL,  -- of the program that read the filesystem
     dirs             bigint      NOT NULL,  -- probed directories
     errors           bigint      NOT NULL,  -- dirs with an error
-    changed          bigint      NOT NULL,  -- dir_state rows stored that are not tombstones
-    deleted          bigint      NOT NULL,  -- tombstones stored
     anonymized       boolean     NOT NULL,
     replayed_from    text,                  -- absolute capture path; NULL for live samples
     stored           timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE trackdir.dir_state (
-    sample_id   bigint NOT NULL REFERENCES trackdir.sample ON DELETE CASCADE,
+    sample_id   bigint NOT NULL REFERENCES trackdir.sample,
     path        bytea  NOT NULL,  -- relative to ROOT; '.' is ROOT
     ino         bigint,
     mode        integer,
@@ -345,11 +346,11 @@ def store_sample(
     """Store a sample of tree KEY, in one transaction; return its id.
 
     The sample row comes from HEADER (dirs and errors count the probed
-    directories); its dir_state rows, loaded with COPY, are DIFF's changed
-    probes and a tombstone per deleted path. KEY must be HEADER's tree (with
-    the run's max_dirs), else ValueError. BASELINE is what DIFF was computed
-    against. REPLAYED_FROM is the capture's absolute path, None for a live
-    sample.
+    directories; its max_depth is the tree's, so not stored again); its
+    dir_state rows, loaded with COPY, are DIFF's changed probes and a
+    tombstone per deleted path. KEY must be HEADER's tree (with the run's
+    max_dirs), else ValueError. BASELINE is what DIFF was computed against.
+    REPLAYED_FROM is the capture's absolute path, None for a live sample.
 
     Raises ConcurrentSample if the tree's latest sample is no longer
     BASELINE's, and OutOfOrderSample (see check_order); nothing is stored.
@@ -361,32 +362,21 @@ def store_sample(
     if key != tree_key_of(header, key.max_dirs):
         raise ValueError(f"tree {key} is not the tree of the header")
     started = datetime.fromisoformat(header.started)
-    params = _key_params(key)
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        cur.execute(
-            "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth,"
-            " max_dirs) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            params,
-        )
-        cur.execute(
-            f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH} FOR UPDATE", params
-        )
-        (tree_id,) = cur.fetchone()
+        tree_id = _lock_tree(cur, key)
         latest = cur.execute(_LATEST_SAMPLE, (tree_id,)).fetchone()
         if (latest[0] if latest else None) != baseline.sample_id:
             raise ConcurrentSample(key)
         check_order(baseline, key, started)
         cur.execute(
-            "INSERT INTO trackdir.sample (tree_id, root, max_depth, rstat_mode,"
-            " openat2, jobs, started, finished, euid, host, kernel,"
-            " trackdir_version, dirs, errors, changed, deleted, anonymized,"
-            " replayed_from) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-            " %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO trackdir.sample (tree_id, root, rstat_mode, openat2,"
+            " jobs, started, finished, euid, host, kernel, trackdir_version,"
+            " dirs, errors, anonymized, replayed_from) VALUES (%s, %s, %s, %s,"
+            " %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 tree_id,
                 os.fsencode(header.root),
-                header.max_depth,
                 header.rstat_mode,
                 header.openat2,
                 header.jobs,
@@ -398,8 +388,6 @@ def store_sample(
                 header.trackdir_version,
                 header.dirs,
                 header.errors,
-                len(diff.changed),
-                len(diff.deleted),
                 header.anonymized,
                 replayed_from,
             ),
@@ -413,6 +401,26 @@ def store_sample(
             for path in diff.deleted:
                 copy.write_row((sample_id, path, *gone, True))
     return sample_id
+
+
+def _lock_tree(cur: "psycopg.Cursor", key: TreeKey) -> int:
+    """Return the id of tree KEY with its row locked, creating the tree if new.
+
+    Selects first so that only a tree's first sample inserts. If a concurrent
+    first sample inserts the row in between, ON CONFLICT waits for it to
+    commit and inserts nothing, and the second select finds the row.
+    """
+    params = _key_params(key)
+    select = f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH} FOR UPDATE"
+    row = cur.execute(select, params).fetchone()
+    if row is None:
+        cur.execute(
+            "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth,"
+            " max_dirs) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            params,
+        )
+        row = cur.execute(select, params).fetchone()
+    return row[0]
 
 
 def _key_params(key: TreeKey) -> tuple[str, str | None, bytes, int, int]:

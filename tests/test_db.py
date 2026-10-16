@@ -206,7 +206,7 @@ def test_import_without_psycopg():
 def test_init_creates_and_is_idempotent(db):
     assert init_schema(db) is True
     assert init_schema(db) is False
-    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(2,)]
+    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(3,)]
     check_schema(db)
 
 
@@ -239,7 +239,7 @@ def test_store_round_trip(db):
     sample_id = store(db, c.header, probes, replayed_from="/abs/sub")
     assert read_sample(db, sample_id) == [replace(p, children=None) for p in probes]
     row = db.execute(
-        "SELECT started, finished, dirs, errors, changed, deleted, replayed_from"
+        "SELECT started, finished, dirs, errors, replayed_from"
         " FROM trackdir.sample WHERE id = %s",
         (sample_id,),
     ).fetchone()
@@ -248,8 +248,6 @@ def test_store_round_trip(db):
         datetime.fromisoformat(c.header.finished),
         c.header.dirs,
         c.header.errors,
-        c.header.dirs,
-        0,
         "/abs/sub",
     )
     current = db.execute("SELECT count(*) FROM trackdir.current_dir_state")
@@ -309,7 +307,9 @@ def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):
     ).fetchone()
     assert tombstone == (True,) + (None,) * len(ROW_COLUMNS)
     assert db.execute(
-        "SELECT changed, deleted FROM trackdir.sample WHERE id = %s", (second_id,)
+        "SELECT count(*) FILTER (WHERE NOT deleted), count(*) FILTER (WHERE deleted)"
+        " FROM trackdir.dir_state WHERE sample_id = %s",
+        (second_id,),
     ).fetchone() == (2, 1)
     current = db.execute("SELECT path FROM trackdir.current_dir_state").fetchall()
     assert sorted(current) == [(ROOT,), (b"a",)]  # a/b's older row stays hidden
@@ -319,6 +319,36 @@ def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):
             " VALUES (%s, %s, 1, true)",
             (second_id, b"x"),
         )
+
+
+def test_deleting_a_sample_with_rows_is_refused(db):
+    import psycopg
+
+    init_schema(db)
+    sample_id = store(db, DEEP, INITIAL)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        db.execute("DELETE FROM trackdir.sample WHERE id = %s", (sample_id,))
+    assert counts(db) == {"tree": 1, "sample": 1, "dir_state": len(INITIAL)}
+
+
+def test_a_tree_is_removed_rows_first(db):
+    init_schema(db)
+    store(db, DEEP, INITIAL)
+    db.execute("DELETE FROM trackdir.dir_state")
+    db.execute("DELETE FROM trackdir.sample")
+    db.execute("DELETE FROM trackdir.tree")
+    assert counts(db) == NOTHING_STORED
+
+
+def test_samples_of_a_tree_do_not_consume_tree_ids(db):
+    init_schema(db)
+    store(db, HEADER, [DirProbe(ROOT, rctime=1)])
+    store(db, later(HEADER, 60), [DirProbe(ROOT, rctime=2)])
+    store(db, later(HEADER, 120, fs_path="/y"), [DirProbe(ROOT)])
+    assert db.execute("SELECT id FROM trackdir.tree ORDER BY id").fetchall() == [
+        (1,),
+        (2,),
+    ]
 
 
 def test_stale_baseline_is_refused(db):
@@ -366,13 +396,13 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
                     db_module._key_params(key),
                 )
                 rival.execute(
-                    "INSERT INTO trackdir.sample (tree_id, root, max_depth,"
-                    " rstat_mode, openat2, jobs, started, finished, euid, host,"
-                    " kernel, trackdir_version, dirs, errors, changed, deleted,"
-                    " anonymized) SELECT tree_id, root, max_depth, rstat_mode,"
-                    " openat2, jobs, started + interval '1 minute', finished,"
-                    " euid, host, kernel, trackdir_version, dirs, errors, 0, 0,"
-                    " anonymized FROM trackdir.sample WHERE id = %s",
+                    "INSERT INTO trackdir.sample (tree_id, root, rstat_mode,"
+                    " openat2, jobs, started, finished, euid, host, kernel,"
+                    " trackdir_version, dirs, errors, anonymized)"
+                    " SELECT tree_id, root, rstat_mode, openat2, jobs,"
+                    " started + interval '1 minute', finished, euid, host,"
+                    " kernel, trackdir_version, dirs, errors, anonymized"
+                    " FROM trackdir.sample WHERE id = %s",
                     (first_id,),
                 )
                 pending = pool.submit(
