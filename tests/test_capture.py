@@ -24,6 +24,8 @@ HEADER = CaptureHeader(
     root="/mnt/cephfs/x",
     max_depth=2,
     cluster_fsid="00000000-0000-0000-0000-000000000000",
+    fs_name=None,
+    fs_path="/x",
     rstat_mode="dirstat",
     openat2=True,
     jobs=4,
@@ -132,7 +134,7 @@ def test_failure_during_commit_leaves_nothing(tmp_path):
 
 def header_json(**changes):
     fields = dataclasses.asdict(replace(HEADER, **changes))
-    return {"format": "trackdir-capture", "version": 1, **fields}
+    return {"format": "trackdir-capture", "version": 2, **fields}
 
 
 EACCES = {"stage": "open", "code": "EACCES"}
@@ -142,8 +144,28 @@ EACCES = {"stage": "open", "code": "EACCES"}
     ("objects", "message"),
     [
         ([{"format": "other"}], "not a trackdir capture"),
-        ([{**header_json(), "version": 2}], "version"),
+        ([{**header_json(), "version": 1}], "version"),
         ([{**header_json(), "max_depth": "2"}], "bad header"),
+        ([{**header_json(), "cluster_fsid": None}], "bad header"),
+        ([{**header_json(), "fs_path": None}], "bad header"),
+        ([{**header_json(), "fs_path": "x"}], "bad header"),
+        ([{**header_json(), "fs_name": 3}], "bad header"),
+        ([header_json(started="yesterday")], "bad header: started"),
+        ([header_json(finished="2026-10-15T00:00:00")], "bad header: finished"),
+        ([header_json(started=0)], "bad header: started"),
+        ([header_json(rstat_mode="bogus")], "bad header: rstat_mode"),
+        ([header_json(openat2=1)], "bad header: openat2"),
+        ([header_json(jobs=True)], "bad header: jobs"),
+        ([header_json(euid=None)], "bad header: euid"),
+        ([header_json(host=3)], "bad header: host"),
+        ([header_json(kernel=None)], "bad header: kernel"),
+        ([header_json(anonymized="no")], "bad header: anonymized"),
+        ([header_json(dirs=1.0)], "bad header: dirs"),
+        ([header_json(fs_path="/a/../b")], "bad header: fs_path"),
+        ([header_json(fs_path="/a/")], "bad header: fs_path"),
+        ([header_json(fs_path="/.")], "bad header: fs_path"),
+        ([header_json(fs_path="//a")], "bad header: fs_path"),
+        ([{**header_json(), "extra": 1}], "bad header"),
         ([header_json(), {"path": "a"}], "first record"),
         ([header_json(), {"path": "."}, {"path": "."}], "duplicate"),
         ([header_json(), {"path": "."}, {"path": "a/b"}], "listed parent"),
@@ -167,6 +189,13 @@ def test_malformed_captures_are_rejected(tmp_path, objects, message):
     path.write_bytes(gzip.compress(lines))
     with pytest.raises(CaptureFormatError, match=message):
         load_capture(path)
+
+
+@pytest.mark.parametrize("fs_path", ["/", "/a/b"])
+def test_normalized_fs_paths_are_accepted(tmp_path, fs_path):
+    out = tmp_path / "c.jsonl.gz"
+    write_capture(out, replace(HEADER, fs_path=fs_path), [DirProbe(ROOT)])
+    assert load_capture(out).header.fs_path == fs_path
 
 
 def test_a_file_that_is_not_gzip_is_rejected(tmp_path):

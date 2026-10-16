@@ -1,5 +1,6 @@
 """Invariants of real, anonymized captures from production CephFS clusters."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,8 @@ from trackdir.capture import ReplayBackend, load_capture
 from trackdir.model import Stage
 from trackdir.walker import walk
 
-DATA = Path(__file__).parent / "data"
+# Overridable so new captures can be checked before they replace the fixtures.
+DATA = Path(os.environ.get("TRACKDIR_FIXTURES_DIR", Path(__file__).parent / "data"))
 FIXTURES = sorted(DATA.glob("*.jsonl.gz"))
 PINNED_NS = 4294967295 * 10**9
 
@@ -20,6 +22,15 @@ def capture(request):
 
 def test_fixtures_exist():
     assert FIXTURES, f"no captures in {DATA}"
+
+
+def test_headers_carry_tree_key(capture):
+    header = capture.header
+    assert len(header.cluster_fsid) == 32  # an fsid token
+    assert header.fs_path.startswith("/")
+    # All fixtures come from mounts of the filesystem root, so fs_path is
+    # ROOT's path below the mount point: a suffix of root.
+    assert header.fs_path == "/" or header.root.endswith(header.fs_path)
 
 
 def test_only_anonymized_captures_are_committed(capture):

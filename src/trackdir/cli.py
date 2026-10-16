@@ -1,55 +1,43 @@
-"""Command-line interface: trackdir capture."""
+"""Command-line interface: trackdir capture, sample and db init."""
 
 import argparse
 import contextlib
-import functools
 import os
 import signal
-import socket
 import stat
 import sys
-import textwrap
-import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
-from trackdir import __version__
+from trackdir import __version__, sample
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
-from trackdir.model import ROOT, DirProbe, ShouldList
-from trackdir.probe import LiveBackend
-from trackdir.rstats import (
-    NotCephFSError,
-    RStatMode,
-    cluster_fsid,
-    detect_mode,
-    read_rstats,
+from trackdir.live import (
+    DEFAULT_JOBS,
+    DEFAULT_MAX_DIRS,
+    open_live_root,
+    walk_live,
 )
-from trackdir.safeopen import SafeRoot, openat2_supported
-from trackdir.walker import DirLimitExceeded, walk
+from trackdir.messages import FatalError, describe_errors, paragraph
+from trackdir.model import DirProbe, error_counts
+from trackdir.rstats import RStatMode
 
-# Probes stay in memory until the end: ~0.6 KB each (measured), so ~0.6 GB.
-DEFAULT_MAX_DIRS = 1_000_000
-DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
-WRAP_WIDTH = 79
+NO_CAPTURE = "no capture was written"  # what a failed capture leaves
 
-MSG_NO_OPENAT2_AS_ROOT = (
-    "this kernel does not provide openat2 (Linux 5.6+), which trackdir needs "
-    "to walk user-writable trees safely as root. Run it on a newer kernel."
-)
-MSG_NO_OPENAT2 = (
-    "this kernel does not provide openat2 (Linux 5.6+), so directories are "
-    "opened one path component at a time. Symlinks are still never followed, "
-    "but mount points are detected only after they are opened."
-)
-MSG_NO_DIRSTAT = (
-    "ROOT's mount lacks the dirstat option, so each directory costs four MDS "
-    "round trips instead of one. Mount with -o dirstat (a separate mount for "
-    "trackdir is enough) to cut the MDS load."
-)
+
+def _exit_status(success: str, unchanged: str) -> str:
+    """Return the epilog paragraph on exit statuses, shared by all commands.
+
+    SUCCESS qualifies status 0; UNCHANGED is what every other status leaves.
+    """
+    return paragraph(
+        f"Exit status: 0 success ({success}), 1 error, 2 usage error, "
+        "130 interrupted, 128+N on signal N (SIGTERM or SIGHUP). On a non-zero "
+        f"status, {unchanged}."
+    )
+
 
 CAPTURE_DESCRIPTION = """\
 Record every directory under ROOT, down to --max-depth, into one gzipped JSON
@@ -69,9 +57,40 @@ read are recorded as EACCES errors, without rstats.
 out of the repository; captures taken with the same key line up:
   {key_recipe("trackdir.key")}
 
-Exit status: 0 success (per-directory errors included), 1 error, 2 usage
-error, 130 interrupted.
+{_exit_status("per-directory errors included", NO_CAPTURE)}"""
+
+SAMPLE_DESCRIPTION = f"""\
+Store the first sample of a tree in PostgreSQL: every directory under ROOT,
+down to --max-depth, with owner, mode, nlink, CephFS rstats and
+per-directory errors. With --replay, read the directories from a capture
+instead of CephFS. Only a tree's first sample is supported so far.
+
+Read-only on ROOT; writes to the database given by --db or {sample.DSN_ENV}.
+The database schema must exist: run `trackdir db init` once.
 """
+
+SAMPLE_EPILOG = f"""\
+Run as root for a complete sample. As another user, directories you cannot
+read are stored as EACCES errors, without rstats.
+
+A tree is a directory of a CephFS filesystem, identified by the cluster fsid,
+the filesystem and the directory's path inside it, so it is the same tree
+whichever host or mount point samples it.
+
+DSN is a libpq connection string or URI, e.g.
+postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass
+or PGPASSWORD, never in --db: ps shows command lines to every local user.
+
+{_exit_status("per-directory errors included", sample.NOTHING_STORED)}"""
+
+DB_INIT_DESCRIPTION = f"""\
+Create trackdir's tables in the database given by --db or {sample.DSN_ENV}.
+Changes the database; safe to repeat.
+"""
+
+DB_INIT_EPILOG = _exit_status(
+    "also when the schema already exists", sample.DB_UNCHANGED
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,12 +120,16 @@ class CaptureResult:
     anonymized: bool
 
 
-class FatalError(Exception):
-    """Stops the run; the message is printed as one ERROR: paragraph."""
+@dataclass(frozen=True, slots=True)
+class _Command:
+    """A parsed command line, ready to run."""
+
+    run: Callable[[], str]  # does the work; returns the success message
+    unchanged: str  # what an interrupted run leaves, e.g. "nothing was stored"
 
 
 class _Terminated(BaseException):
-    """A termination signal arrived; unwinding removes the temp file."""
+    """A termination signal arrived; unwinding cleans up (temp file, transaction)."""
 
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
@@ -121,97 +144,112 @@ def run_capture(opts: CaptureOptions, warn: Callable[[str], None]) -> CaptureRes
     """
     _check_output(opts.output, opts.root)
     key = _load_key(opts.key_file) if opts.key_file is not None else None
-    use_openat2 = openat2_supported()
-    if not use_openat2:
-        if os.geteuid() == 0:
-            raise FatalError(MSG_NO_OPENAT2_AS_ROOT)
-        warn(MSG_NO_OPENAT2)
-    with _open_root(opts.root, use_openat2) as root:
-        root_path = root.resolved_path()
-        mode, fsid = _inspect_root(root, opts.root)
-        if mode is RStatMode.GETXATTR:
-            warn(MSG_NO_DIRSTAT)
-        backend = LiveBackend(root, functools.partial(read_rstats, mode=mode))
-        with _create_writer(opts.output) as writer:
-            started = datetime.now(UTC)
-            clock = time.monotonic()
-            probes = _walk(backend, opts)
-            elapsed = time.monotonic() - clock
-            header = CaptureHeader(
-                root=root_path,
-                max_depth=opts.max_depth,
-                cluster_fsid=fsid,
-                rstat_mode=mode.value,
-                openat2=use_openat2,
-                jobs=opts.jobs,
-                started=started.isoformat(),
-                finished=datetime.now(UTC).isoformat(),
-                euid=os.geteuid(),
-                host=socket.gethostname(),
-                kernel=os.uname().release,
-                trackdir_version=__version__,
-                dirs=len(probes),
-                errors=sum(p.error is not None for p in probes),
-                anonymized=False,
-            )
-            if key is not None:
-                header, probes = _anonymize(header, probes, key)
-            _commit(writer, header, probes, opts.output)
+    with open_live_root(opts.root, warn) as live, _create_writer(opts.output) as writer:
+        result = walk_live(
+            live, max_depth=opts.max_depth, max_dirs=opts.max_dirs, jobs=opts.jobs
+        )
+        header, probes = result.header, result.probes
+        if key is not None:
+            header, probes = _anonymize(header, probes, key)
+        _commit(writer, header, probes, opts.output)
     return CaptureResult(
-        root=root_path,
+        root=live.path,
         output=opts.output,
         max_depth=opts.max_depth,
         dirs=len(probes),
-        errors=Counter((str(p.error.stage), p.error.code) for p in probes if p.error),
-        elapsed=elapsed,
-        rstat_mode=mode,
-        openat2=use_openat2,
+        errors=error_counts(probes),
+        elapsed=result.elapsed,
+        rstat_mode=live.rstat_mode,
+        openat2=live.openat2,
         anonymized=key is not None,
     )
 
 
 def render_summary(result: CaptureResult) -> str:
     """Return the success message for RESULT as one wrapped paragraph."""
-    if result.errors:
-        counts = ", ".join(
-            f"{stage} {code} {n}" for (stage, code), n in sorted(result.errors.items())
-        )
-        outcome = f"{result.errors.total()} had errors: {counts}"
-    else:
-        outcome = "none had errors"
-    return _paragraph(
+    return paragraph(
         f"Captured {result.dirs} directories under {result.root} to depth "
         f"{result.max_depth} into {result.output} in {result.elapsed:.1f} s; "
-        f"{outcome}."
+        f"{describe_errors(result.errors)}."
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the trackdir command line and return the exit status."""
     args = _parser().parse_args(argv)
+    command = args.prepare(args)
+    try:
+        with _terminate_on_signals():
+            message = command.run()
+    except FatalError as e:
+        sys.stderr.write(paragraph(f"ERROR: {e}"))
+        return 1
+    except KeyboardInterrupt:
+        sys.stderr.write(paragraph(f"ERROR: interrupted; {command.unchanged}."))
+        return 130
+    except _Terminated as e:
+        name = signal.Signals(e.signum).name
+        sys.stderr.write(paragraph(f"ERROR: {name} received; {command.unchanged}."))
+        return 128 + e.signum
+    sys.stderr.write(message)
+    return 0
+
+
+def _prepare_capture(args: argparse.Namespace) -> _Command:
     opts = CaptureOptions(
         root=args.root,
         max_depth=args.max_depth,
         output=args.output,
         max_dirs=args.max_dirs,
-        jobs=args.jobs,
+        jobs=_jobs(args),
         key_file=args.anonymize,
     )
-    try:
-        with _terminate_on_signals():
-            result = run_capture(opts, _warn)
-    except FatalError as e:
-        sys.stderr.write(_paragraph(f"ERROR: {e}"))
-        return 1
-    except KeyboardInterrupt:
-        sys.stderr.write(_paragraph("ERROR: interrupted; no capture was written."))
-        return 130
-    except _Terminated as e:
-        name = signal.Signals(e.signum).name
-        sys.stderr.write(_paragraph(f"ERROR: {name} received; no capture was written."))
-        return 128 + e.signum
-    sys.stderr.write(render_summary(result))
-    return 0
+    return _Command(lambda: render_summary(run_capture(opts, _warn)), NO_CAPTURE)
+
+
+def _prepare_sample(args: argparse.Namespace) -> _Command:
+    """Check the combination of options; exits with a usage error if it is wrong."""
+    error = args.parser.error
+    if args.root is not None and args.replay is not None:
+        error("give ROOT or --replay CAPTURE, not both")
+    if args.root is None and args.replay is None:
+        error("give ROOT or --replay CAPTURE")
+    if args.replay is not None and args.jobs is not None:
+        error("--jobs applies to ROOT only; a replay uses one job")
+    if args.root is not None and args.max_depth is None:
+        error("--max-depth is required with ROOT")
+    opts = sample.SampleOptions(
+        dsn=_dsn(args),
+        root=args.root,
+        replay=args.replay,
+        max_depth=args.max_depth,
+        max_dirs=args.max_dirs,
+        jobs=_jobs(args),
+    )
+    return _Command(
+        lambda: sample.render_sample_summary(sample.run_sample(opts, _warn)),
+        sample.NOTHING_STORED,
+    )
+
+
+def _prepare_db_init(args: argparse.Namespace) -> _Command:
+    dsn = _dsn(args)
+    return _Command(
+        lambda: sample.render_db_init(sample.run_db_init(dsn)),
+        sample.DB_UNCHANGED,
+    )
+
+
+def _jobs(args: argparse.Namespace) -> int:
+    return DEFAULT_JOBS if args.jobs is None else args.jobs
+
+
+def _dsn(args: argparse.Namespace) -> str:
+    """Return --db, else $TRACKDIR_DB; exits with a usage error if neither is set."""
+    dsn = args.db or os.environ.get(sample.DSN_ENV)
+    if not dsn:
+        args.parser.error(f"no database given: pass --db DSN or set {sample.DSN_ENV}")
+    return dsn
 
 
 @contextlib.contextmanager
@@ -219,7 +257,8 @@ def _terminate_on_signals() -> Iterator[None]:
     """Turn SIGTERM and SIGHUP into _Terminated while the body runs.
 
     Their default action kills the process without unwinding, which would
-    leave the hidden temp file behind (timeout, systemd, a dropped ssh session).
+    leave capture's hidden temp file behind (timeout, systemd, a dropped ssh
+    session).
     """
 
     def handler(signum: int, frame: object) -> None:
@@ -232,11 +271,6 @@ def _terminate_on_signals() -> Iterator[None]:
     finally:
         for signum, action in previous.items():
             signal.signal(signum, action)
-
-
-def _list_above(max_depth: int) -> ShouldList:
-    """List directories above MAX_DEPTH, so the walk stops there."""
-    return lambda probe: probe.depth < max_depth
 
 
 def _check_output(output: Path, root: Path) -> None:
@@ -282,53 +316,11 @@ def _load_key(path: Path) -> bytes:
         raise FatalError(f"{e}.") from e
 
 
-def _open_root(path: Path, use_openat2: bool) -> SafeRoot:
-    try:
-        return SafeRoot(path, use_openat2=use_openat2)
-    except OSError as e:
-        raise FatalError(
-            f"cannot open ROOT {path}: {e.strerror}. ROOT must be a directory, "
-            "not a symlink."
-        ) from e
-
-
-def _inspect_root(root: SafeRoot, path: Path) -> tuple[RStatMode, str | None]:
-    """Return the rstat mode and cluster fsid of ROOT's filesystem."""
-    try:
-        fd = root.open(ROOT, os.O_RDONLY)
-        try:
-            return detect_mode(fd), cluster_fsid(fd)
-        finally:
-            os.close(fd)
-    except NotCephFSError:
-        raise FatalError(
-            f"ROOT {path} is not on CephFS (it has no ceph.dir.rctime)."
-        ) from None
-    except OSError as e:
-        raise FatalError(f"cannot read ROOT {path}: {e.strerror}.") from e
-
-
 def _create_writer(output: Path) -> CaptureWriter:
     try:
         return CaptureWriter(output)
     except OSError as e:
         raise FatalError(f"cannot create {output}: {e.strerror}.") from e
-
-
-def _walk(backend: LiveBackend, opts: CaptureOptions) -> list[DirProbe]:
-    try:
-        return walk(
-            backend,
-            _list_above(opts.max_depth),
-            max_dirs=opts.max_dirs,
-            jobs=opts.jobs,
-        )
-    except DirLimitExceeded as e:
-        raise FatalError(
-            f"ROOT has more than {e.limit} directories within depth "
-            f"{opts.max_depth}. Raise --max-dirs if memory allows, or lower "
-            "--max-depth."
-        ) from e
 
 
 def _anonymize(
@@ -349,15 +341,8 @@ def _commit(
         raise FatalError(f"cannot write {output}: {e.strerror}.") from e
 
 
-def _paragraph(text: str) -> str:
-    wrapped = textwrap.fill(
-        text, WRAP_WIDTH, break_long_words=False, break_on_hyphens=False
-    )
-    return wrapped + "\n"
-
-
 def _warn(message: str) -> None:
-    sys.stderr.write(_paragraph(f"WARNING: {message}"))
+    sys.stderr.write(paragraph(f"WARNING: {message}"))
 
 
 def _int_at_least(minimum: int) -> Callable[[str], int]:
@@ -383,21 +368,17 @@ def _parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    capture = commands.add_parser(
+
+    capture = _add_command(
+        commands,
         "capture",
+        _prepare_capture,
         help="record directory state under ROOT for offline use",
         description=CAPTURE_DESCRIPTION,
         epilog=CAPTURE_EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     capture.add_argument("root", metavar="ROOT", type=Path, help="CephFS directory")
-    capture.add_argument(
-        "--max-depth",
-        type=_int_at_least(0),
-        required=True,
-        metavar="N",
-        help="record directories at most N levels below ROOT (0: ROOT only)",
-    )
+    _add_max_depth(capture, required=True)
     capture.add_argument(
         "-o",
         "--output",
@@ -406,24 +387,106 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="capture file to create (.jsonl.gz)",
     )
-    capture.add_argument(
-        "--max-dirs",
-        type=_int_at_least(1),
-        default=DEFAULT_MAX_DIRS,
-        metavar="N",
-        help="fail if there are more than N directories (default: %(default)s)",
-    )
-    capture.add_argument(
-        "--jobs",
-        type=_int_at_least(1),
-        default=DEFAULT_JOBS,
-        metavar="N",
-        help="directories probed concurrently (default: %(default)s)",
-    )
+    _add_max_dirs(capture)
+    _add_jobs(capture)
     capture.add_argument(
         "--anonymize",
         type=Path,
         metavar="KEYFILE",
         help="replace names and ids with HMAC tokens keyed by KEYFILE",
     )
+
+    sample_parser = _add_command(
+        commands,
+        "sample",
+        _prepare_sample,
+        help="store the first sample of the tree at ROOT in PostgreSQL",
+        description=SAMPLE_DESCRIPTION,
+        epilog=SAMPLE_EPILOG,
+    )
+    sample_parser.add_argument(
+        "root", metavar="ROOT", type=Path, nargs="?", help="CephFS directory"
+    )
+    sample_parser.add_argument(
+        "--replay",
+        type=Path,
+        metavar="CAPTURE",
+        help="read the directories from the capture file CAPTURE instead of ROOT",
+    )
+    _add_max_depth(
+        sample_parser, required=False, note="; default with --replay: the capture's"
+    )
+    _add_max_dirs(sample_parser)
+    _add_jobs(sample_parser)
+    _add_db(sample_parser)
+
+    db = commands.add_parser(
+        "db",
+        help="manage trackdir's database schema",
+        description="Manage trackdir's database schema.",
+    )
+    db_commands = db.add_subparsers(dest="db_command", required=True, metavar="COMMAND")
+    init = _add_command(
+        db_commands,
+        "init",
+        _prepare_db_init,
+        help="create trackdir's tables (changes the database)",
+        description=DB_INIT_DESCRIPTION,
+        epilog=DB_INIT_EPILOG,
+    )
+    _add_db(init)
     return parser
+
+
+def _add_command(
+    commands: argparse._SubParsersAction,
+    name: str,
+    prepare: Callable[[argparse.Namespace], _Command],
+    **kwargs: str,
+) -> argparse.ArgumentParser:
+    """Add subcommand NAME; main() runs what PREPARE returns for its arguments."""
+    command = commands.add_parser(
+        name, formatter_class=argparse.RawDescriptionHelpFormatter, **kwargs
+    )
+    command.set_defaults(prepare=prepare, parser=command)
+    return command
+
+
+def _add_max_depth(
+    parser: argparse.ArgumentParser, *, required: bool, note: str = ""
+) -> None:
+    parser.add_argument(
+        "--max-depth",
+        type=_int_at_least(0),
+        required=required,
+        metavar="N",
+        help=f"include directories at most N levels below ROOT (0: ROOT only){note}",
+    )
+
+
+def _add_max_dirs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--max-dirs",
+        type=_int_at_least(1),
+        default=DEFAULT_MAX_DIRS,
+        metavar="N",
+        help="fail if there are more than N directories (default: %(default)s)",
+    )
+
+
+def _add_jobs(parser: argparse.ArgumentParser) -> None:
+    # No argparse default, so a command can tell whether --jobs was given.
+    parser.add_argument(
+        "--jobs",
+        type=_int_at_least(1),
+        metavar="N",
+        help=f"directories probed concurrently (default: {DEFAULT_JOBS})",
+    )
+
+
+def _add_db(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--db",
+        metavar="DSN",
+        help=f"PostgreSQL connection string (default: ${sample.DSN_ENV})",
+    )

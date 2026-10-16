@@ -2,7 +2,9 @@
 
 - Paths are `bytes` internally, relative to ROOT and joined with `/`; ROOT is
   `b"."`. They become `str` only in JSON, through `os.fsdecode`
-  (surrogateescape), so names that are not UTF-8 round-trip exactly.
+  (surrogateescape), so names that are not UTF-8 round-trip exactly. In the
+  database they are `bytea`; header strings become bytes through
+  `os.fsencode`.
 - Times are integer nanoseconds since the epoch, never floats. Capture
   headers use ISO 8601 UTC strings.
 - Error codes are errno names (`EACCES`), or `DIRSTAT_STALE` and `PARSE`.
@@ -16,8 +18,12 @@
   `read`, because readdir on the same fd may follow.
 - Messages go to stderr as one wrapped paragraph each, prefixed `ERROR:` or
   `WARNING:`; stdout carries results only.
+- Database errors are `db.DbError` subclasses (psycopg errors are wrapped);
+  `sample.py` turns them into `FatalError` messages, in one place.
 - Tests need neither Ceph nor root. Real CephFS data enters tests only as
   anonymized captures in `tests/data/`.
 - The development database is the podman container `trackdir-postgres`,
-  managed by `scripts/postgres.sh`; the existing tests do not need it.
+  managed by `scripts/postgres.sh`. Database tests opt in through
+  `TRACKDIR_TEST_DSN` (the `db` fixture) and are skipped without it; they
+  refuse a database whose name does not end in `_test`.
   `tests/test_postgres_script.py` tests the script against a stub `podman`.

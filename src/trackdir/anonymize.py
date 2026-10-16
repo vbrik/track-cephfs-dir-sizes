@@ -101,7 +101,7 @@ class Anonymizer:
 def anonymize(
     header: CaptureHeader, probes: Sequence[DirProbe], key: bytes
 ) -> tuple[CaptureHeader, list[DirProbe]]:
-    """Return HEADER and PROBES with names, uids, gids and fsid replaced.
+    """Return HEADER and PROBES with names, uids, gids, fsid and fs name replaced.
 
     The probes are returned in tree order. Raises AnonymizationError if two
     sibling names or two ids map to the same token.
@@ -136,9 +136,11 @@ def anonymize(
     new_header = replace(
         header,
         root=an.abs_path(header.root),
-        cluster_fsid=None
-        if header.cluster_fsid is None
-        else an.fsid(header.cluster_fsid),
+        cluster_fsid=an.fsid(header.cluster_fsid),
+        fs_name=None
+        if header.fs_name is None
+        else an.name(os.fsencode(header.fs_name)).decode("ascii"),
+        fs_path=an.abs_path(header.fs_path),
         euid=fake_ids[header.euid],
         host=None,
         anonymized=True,

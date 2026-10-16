@@ -5,8 +5,9 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from conftest import collapse, must_not_walk
 
-from trackdir import cli
+from trackdir import live
 from trackdir.anonymize import key_recipe
 from trackdir.capture import load_capture
 from trackdir.cli import (
@@ -17,34 +18,8 @@ from trackdir.cli import (
     render_summary,
     run_capture,
 )
-from trackdir.model import RStats
+from trackdir.mount import MountError
 from trackdir.rstats import RStatMode
-
-
-def collapse(text: str) -> str:
-    return " ".join(text.split())
-
-
-def must_not_walk(*args, **kwargs):
-    pytest.fail("walked although an earlier check should have failed")
-
-
-@pytest.fixture
-def fake_ceph(monkeypatch):
-    """Make local directories look like CephFS mounted with dirstat."""
-    monkeypatch.setattr(cli, "detect_mode", lambda fd: RStatMode.DIRSTAT)
-    monkeypatch.setattr(cli, "cluster_fsid", lambda fd: "fsid")
-    monkeypatch.setattr(
-        cli, "read_rstats", lambda fd, mode: RStats(1_000_000_000, 10, 2, 1)
-    )
-
-
-@pytest.fixture
-def tree(tmp_path):
-    root = tmp_path / "root"
-    (root / "a" / "b" / "c").mkdir(parents=True)
-    (root / "z").mkdir()
-    return root
 
 
 def options(tree, tmp_path, **changes):
@@ -63,6 +38,7 @@ def test_capture_writes_the_file_and_reports_counts(tree, tmp_path, fake_ceph):
     assert capture.header.dirs == 4
     assert capture.header.rstat_mode == "dirstat"
     assert capture.header.cluster_fsid == "fsid"
+    assert capture.header.fs_name is None and capture.header.fs_path == "/x"
     assert not capture.header.anonymized
     assert result.dirs == 4
     assert not result.errors
@@ -113,7 +89,7 @@ def test_summary_lists_errors_by_stage_and_code():
 
 def test_existing_output_is_refused_before_walking(tree, tmp_path, monkeypatch):
     (tmp_path / "out.jsonl.gz").write_bytes(b"x")
-    monkeypatch.setattr(cli, "walk", must_not_walk)
+    monkeypatch.setattr(live, "walk", must_not_walk)
     with pytest.raises(FatalError, match="already exists"):
         run_capture(options(tree, tmp_path), print)
 
@@ -129,7 +105,7 @@ def test_output_inside_root_is_refused_with_relative_paths(tree, monkeypatch):
 
 
 def test_missing_output_directory_fails_before_walking(tree, tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "walk", must_not_walk)
+    monkeypatch.setattr(live, "walk", must_not_walk)
     with pytest.raises(FatalError, match="does not exist"):
         run_capture(options(tree, tmp_path, output=tmp_path / "no" / "o.gz"), print)
 
@@ -139,7 +115,7 @@ def test_unsearchable_output_directory_reports_why(tree, tmp_path, monkeypatch):
     locked = tmp_path / "locked"
     (locked / "sub").mkdir(parents=True)
     locked.chmod(0)
-    monkeypatch.setattr(cli, "walk", must_not_walk)
+    monkeypatch.setattr(live, "walk", must_not_walk)
     try:
         with pytest.raises(FatalError, match="Permission denied"):
             output = locked / "sub" / "o.gz"
@@ -150,7 +126,7 @@ def test_unsearchable_output_directory_reports_why(tree, tmp_path, monkeypatch):
 
 def test_output_directory_that_is_a_file_is_refused(tree, tmp_path, monkeypatch):
     (tmp_path / "file").touch()
-    monkeypatch.setattr(cli, "walk", must_not_walk)
+    monkeypatch.setattr(live, "walk", must_not_walk)
     with pytest.raises(FatalError, match="not a directory"):
         run_capture(options(tree, tmp_path, output=tmp_path / "file" / "o.gz"), print)
 
@@ -162,7 +138,7 @@ def test_unwritable_output_directory_fails_before_walking(
     readonly = tmp_path / "readonly"
     readonly.mkdir()
     readonly.chmod(0o500)
-    monkeypatch.setattr(cli, "walk", must_not_walk)
+    monkeypatch.setattr(live, "walk", must_not_walk)
     try:
         with pytest.raises(FatalError, match="cannot create"):
             run_capture(options(tree, tmp_path, output=readonly / "o.gz"), print)
@@ -192,6 +168,24 @@ def test_help_shows_a_private_key_recipe(capsys):
     assert key_recipe("trackdir.key") in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("command", "unchanged"),
+    [
+        (["capture"], "no capture was written"),
+        (["sample"], "nothing was stored"),
+        (["db", "init"], "the database was not changed"),
+    ],
+)
+def test_help_lists_every_exit_status(capsys, command, unchanged):
+    with pytest.raises(SystemExit):
+        main([*command, "--help"])
+    out = collapse(capsys.readouterr().out)
+    status = out[out.index("Exit status:") :]
+    for code in ("0 success", "1 error", "2 usage error", "130", "128+N"):
+        assert code in status
+    assert unchanged in status
+
+
 def test_symlink_root_is_refused(tree, tmp_path, fake_ceph):
     link = tmp_path / "link"
     link.symlink_to(tree)
@@ -205,6 +199,23 @@ def test_local_directory_is_not_cephfs(tree, tmp_path):
     assert sorted(os.listdir(tmp_path)) == ["root"]
 
 
+def test_capture_fails_before_walking_without_identity(
+    tree, tmp_path, fake_ceph, monkeypatch
+):
+    def unidentifiable(fd, root):
+        raise MountError("filesystem type is ext4, not ceph")
+
+    monkeypatch.setattr(live, "identify", unidentifiable)
+    monkeypatch.setattr(live, "walk", must_not_walk)
+    with pytest.raises(FatalError, match="kernel client"):
+        run_capture(options(tree, tmp_path), print)
+    assert sorted(os.listdir(tmp_path)) == ["root"]
+    assert (
+        main(["capture", str(tree), "--max-depth", "1", "-o", str(tmp_path / "o")]) == 1
+    )
+    assert sorted(os.listdir(tmp_path)) == ["root"]
+
+
 def test_dir_limit_leaves_nothing(tree, tmp_path, fake_ceph):
     with pytest.raises(FatalError, match="more than 2 directories"):
         run_capture(options(tree, tmp_path, max_dirs=2), print)
@@ -215,14 +226,14 @@ def test_interrupt_leaves_nothing(tree, tmp_path, fake_ceph, monkeypatch):
     def interrupted(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "walk", interrupted)
+    monkeypatch.setattr(live, "walk", interrupted)
     with pytest.raises(KeyboardInterrupt):
         run_capture(options(tree, tmp_path), print)
     assert sorted(os.listdir(tmp_path)) == ["root"]
 
 
 def test_missing_openat2_warns_when_not_root(tree, tmp_path, fake_ceph, monkeypatch):
-    monkeypatch.setattr(cli, "openat2_supported", lambda: False)
+    monkeypatch.setattr(live, "openat2_supported", lambda: False)
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     warned = []
     run_capture(options(tree, tmp_path), warned.append)
@@ -231,14 +242,14 @@ def test_missing_openat2_warns_when_not_root(tree, tmp_path, fake_ceph, monkeypa
 
 
 def test_missing_openat2_is_fatal_for_root(tree, tmp_path, fake_ceph, monkeypatch):
-    monkeypatch.setattr(cli, "openat2_supported", lambda: False)
+    monkeypatch.setattr(live, "openat2_supported", lambda: False)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     with pytest.raises(FatalError, match="openat2"):
         run_capture(options(tree, tmp_path), print)
 
 
 def test_getxattr_mode_warns(tree, tmp_path, fake_ceph, monkeypatch):
-    monkeypatch.setattr(cli, "detect_mode", lambda fd: RStatMode.GETXATTR)
+    monkeypatch.setattr(live, "detect_mode", lambda fd: RStatMode.GETXATTR)
     warned = []
     run_capture(options(tree, tmp_path), warned.append)
     assert len(warned) == 1
@@ -263,7 +274,7 @@ def test_main_interrupted(tree, tmp_path, fake_ceph, monkeypatch, capsys):
     def interrupted(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "walk", interrupted)
+    monkeypatch.setattr(live, "walk", interrupted)
     out = tmp_path / "o.jsonl.gz"
     assert main(["capture", str(tree), "--max-depth", "1", "-o", str(out)]) == 130
     assert "interrupted" in capsys.readouterr().err
@@ -286,7 +297,7 @@ def test_termination_signal_leaves_nothing(
         pytest.fail("the signal did not interrupt the walk")
 
     previous = signal.signal(signum, guard)  # keeps pytest alive if main() fails
-    monkeypatch.setattr(cli, "walk", terminated)
+    monkeypatch.setattr(live, "walk", terminated)
     out = tmp_path / "o.jsonl.gz"
     try:
         status = main(["capture", str(tree), "--max-depth", "1", "-o", str(out)])

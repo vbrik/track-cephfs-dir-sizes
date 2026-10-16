@@ -5,9 +5,13 @@ import pytest
 from trackdir.model import (
     ROOT,
     DirProbe,
+    ProbeError,
+    Stage,
     check_path,
     errno_name,
+    error_counts,
     join,
+    list_above,
     path_depth,
     split,
     tree_key,
@@ -52,3 +56,20 @@ def test_errno_name():
     assert errno_name(errno.EACCES) == "EACCES"
     assert errno_name(99999) == "errno99999"
     assert errno_name(None) == "EUNKNOWN"
+
+
+def test_list_above():
+    should_list = list_above(1)
+    assert should_list(DirProbe(ROOT))
+    assert not should_list(DirProbe(b"a"))
+
+
+def test_error_counts():
+    probes = [
+        DirProbe(ROOT),
+        DirProbe(b"a", error=ProbeError(Stage.OPEN, "EACCES")),
+        DirProbe(b"b", error=ProbeError(Stage.OPEN, "EACCES")),
+        DirProbe(b"c", error=ProbeError(Stage.READDIR, "EIO")),
+    ]
+    assert error_counts(probes) == {("open", "EACCES"): 2, ("readdir", "EIO"): 1}
+    assert not error_counts([DirProbe(ROOT)])

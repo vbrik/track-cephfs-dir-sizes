@@ -15,8 +15,9 @@ import tempfile
 import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Self
+from typing import Self, get_args
 
 from trackdir.model import (
     ROOT,
@@ -27,10 +28,12 @@ from trackdir.model import (
     check_path,
     split,
 )
+from trackdir.rstats import RStatMode
 
 FORMAT = "trackdir-capture"
-VERSION = 1
+VERSION = 2
 GZIP_LEVEL = 6  # the stdlib default, 9, is several times slower for a few % less
+_RSTAT_MODES = frozenset(mode.value for mode in RStatMode)
 _STAT_FIELDS = (
     "ino",
     "mode",
@@ -50,7 +53,9 @@ class CaptureHeader:
 
     root: str  # ROOT as the kernel resolved it
     max_depth: int
-    cluster_fsid: str | None
+    cluster_fsid: str
+    fs_name: str | None  # None if the mount does not name its filesystem
+    fs_path: str  # root's absolute path in the filesystem; with the two above, the key
     rstat_mode: str  # an RStatMode value
     openat2: bool
     jobs: int
@@ -143,8 +148,9 @@ def load_capture(path: Path) -> Capture:
             header = _header_from_json(json.loads(f.readline()))
             records = [_probe_from_json(json.loads(line)) for line in f]
     # ValueError covers JSON and UTF-8 decoding; the others, gzip damage.
+    # Callers name PATH in their messages.
     except (EOFError, gzip.BadGzipFile, zlib.error, ValueError) as e:
-        raise CaptureFormatError(f"{path}: {e}") from e
+        raise CaptureFormatError(str(e)) from e
     return Capture(header, _with_children(records, header.max_depth))
 
 
@@ -176,6 +182,12 @@ def _header_to_json(header: CaptureHeader) -> dict[str, object]:
 
 
 def _header_from_json(obj: object) -> CaptureHeader:
+    """Return the validated header in OBJ; raises CaptureFormatError.
+
+    Every field must have its declared type (an int is not a bool), and the
+    values must be what a capture writes: rstat_mode an RStatMode value,
+    times ISO 8601 with a UTC offset, fs_path absolute and normalized.
+    """
     if not isinstance(obj, dict) or obj.get("format") != FORMAT:
         raise CaptureFormatError("not a trackdir capture")
     if obj.get("version") != VERSION:
@@ -188,9 +200,36 @@ def _header_from_json(obj: object) -> CaptureHeader:
         header = CaptureHeader(**fields)
     except TypeError as e:
         raise CaptureFormatError(f"bad header: {e}") from e
-    if type(header.max_depth) is not int or header.max_depth < 0:
+    for field in dataclasses.fields(CaptureHeader):
+        value = getattr(header, field.name)
+        if type(value) not in (get_args(field.type) or (field.type,)):
+            raise CaptureFormatError(f"bad header: {field.name} {value!r}")
+    if header.max_depth < 0:
         raise CaptureFormatError(f"bad header: max_depth {header.max_depth!r}")
+    if header.rstat_mode not in _RSTAT_MODES:
+        raise CaptureFormatError(f"bad header: rstat_mode {header.rstat_mode!r}")
+    for name in ("started", "finished"):
+        if not _is_aware_time(getattr(header, name)):
+            raise CaptureFormatError(f"bad header: {name} {getattr(header, name)!r}")
+    if not _is_normalized_absolute(header.fs_path):
+        raise CaptureFormatError(f"bad header: fs_path {header.fs_path!r}")
     return header
+
+
+def _is_aware_time(text: str) -> bool:
+    """Return whether TEXT is an ISO 8601 time with a UTC offset."""
+    try:
+        return datetime.fromisoformat(text).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _is_normalized_absolute(path: str) -> bool:
+    """Return whether PATH is "/" or absolute without "", "." or ".." components."""
+    return path == "/" or (
+        path.startswith("/")
+        and all(c not in ("", ".", "..") for c in path[1:].split("/"))
+    )
 
 
 def _probe_to_json(probe: DirProbe) -> dict[str, object]:

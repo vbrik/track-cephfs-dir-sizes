@@ -3,6 +3,12 @@
 Status: design approved in brainstorming on 2026-10-15; next step is the
 implementation plan.
 
+Amended 2026-10-16 by the
+[initial-sample design](2026-10-16-trackdir-initial-sample-design.md): the
+capture format is version 2, whose header makes `cluster_fsid` required and
+adds `fs_name` and `fs_path`, and capture now fails when ROOT's identity (cluster fsid and
+CephFS mount) cannot be determined.
+
 ## 1. Goal and scope
 
 `trackdir` will track how CephFS directory sizes change over time: a sampler

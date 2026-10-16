@@ -18,5 +18,11 @@
 | getxattr mode | Reading each rstat with its own getxattr; used when the mount lacks `dirstat`. |
 | capture | A file with one probe result per directory of the tracked space, for offline use. |
 | replay | Serving a capture to the walker instead of a live filesystem. |
-| anonymized capture | A capture whose names, uids, gids and cluster fsid are replaced by HMAC tokens. |
-| sample | (Planned) A sparse record of the directories that changed since their last known state. |
+| anonymized capture | A capture whose names, uids, gids, cluster fsid, fs name and fs path are replaced by HMAC tokens. |
+| tree | A directory of a CephFS filesystem, identified by (cluster fsid, fs name, fs path); the same on every host and mount point. Samples belong to a tree. |
+| filesystem path (`fs_path`) | ROOT's absolute path inside its CephFS filesystem; `/` is the filesystem's root. Unlike ROOT, it does not depend on where the filesystem is mounted. |
+| fs name (`fs_name`) | The CephFS filesystem's name, as the mount names it; NULL (None) means the cluster's default filesystem. |
+| sample | The state of a tree's directories at one time, stored in PostgreSQL. Later samples will record only the directories that changed since their last known state. |
+| initial sample | A tree's first sample: every directory of the tracked space. The only kind `trackdir sample` stores so far. |
+| dir state | One directory's row in a sample (`trackdir.dir_state`): owner, mode, nlink, rstats or its error. |
+| current state | Each directory's latest dir state across a tree's samples (view `trackdir.current_dir_state`). |

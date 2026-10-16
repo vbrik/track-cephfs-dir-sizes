@@ -4,7 +4,8 @@ Paths are bytes relative to ROOT, components joined by b"/"; ROOT itself is b"."
 """
 
 import errno
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -70,6 +71,16 @@ class DirProbe:
 
 # Decides, from a probe without children, whether to list the directory.
 type ShouldList = Callable[[DirProbe], bool]
+
+
+def list_above(max_depth: int) -> ShouldList:
+    """List directories above MAX_DEPTH, so a walk stops there."""
+    return lambda probe: probe.depth < max_depth
+
+
+def error_counts(probes: Iterable[DirProbe]) -> Counter[tuple[str, str]]:
+    """Count the directories of PROBES by their error: (stage, code) -> number."""
+    return Counter((str(p.error.stage), p.error.code) for p in probes if p.error)
 
 
 class Backend(Protocol):

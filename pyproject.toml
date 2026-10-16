@@ -28,6 +28,9 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2"]
+
 [project.scripts]
 trackdir = "trackdir.cli:main"
 

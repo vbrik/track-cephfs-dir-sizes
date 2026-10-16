@@ -1,5 +1,6 @@
 import stat
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,9 +18,11 @@ from trackdir.model import ROOT, DirProbe, ProbeError, Stage, split, tree_key
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(1, 33))
 HEADER = CaptureHeader(
-    root="/mnt/ceph2/x",
+    root="/mnt/ceph1/proj/sub",
     max_depth=2,
     cluster_fsid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    fs_name="default",
+    fs_path="/proj/sub",
     rstat_mode="dirstat",
     openat2=True,
     jobs=4,
@@ -55,11 +58,30 @@ def test_names_ids_and_header_are_replaced():
     assert {p.uid for p in probes} == {0, an.numeric_id(1000), an.numeric_id(2000)}
     assert header.anonymized
     assert header.host is None
-    assert header.root.count("/") == 3
-    assert "ceph2" not in header.root
+    assert header.root.count("/") == 4
+    assert "ceph1" not in header.root
     assert len(header.cluster_fsid) == 32
     assert header.cluster_fsid != HEADER.cluster_fsid
     assert header.euid == an.numeric_id(1000)
+
+
+def test_fs_path_tokens_are_a_suffix_of_root():
+    h, _ = anonymize(HEADER, PROBES, KEY)
+    assert h.root.endswith(h.fs_path)
+    assert h.fs_path.count("/") == 2
+
+
+def test_fs_name_is_tokenized_stably():
+    h, _ = anonymize(HEADER, PROBES, KEY)
+    assert h.fs_name == anonymize(HEADER, PROBES, KEY)[0].fs_name
+    assert len(h.fs_name) == 16
+    int(h.fs_name, 16)
+    assert h.fs_name != "default"
+
+
+def test_unnamed_fs_stays_none():
+    h, _ = anonymize(replace(HEADER, fs_name=None), PROBES, KEY)
+    assert h.fs_name is None
 
 
 def test_other_fields_and_tree_shape_are_kept():
