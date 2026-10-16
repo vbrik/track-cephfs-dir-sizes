@@ -23,8 +23,8 @@
 | filesystem path (`fs_path`) | ROOT's absolute path inside its CephFS filesystem; `/` is the filesystem's root. Unlike ROOT, it does not depend on where the filesystem is mounted. |
 | fs name (`fs_name`) | The CephFS filesystem's name, as the mount names it; NULL (None) means the cluster's default filesystem. |
 | sample | One run of `trackdir sample`, stored in PostgreSQL: the directories of a tree whose state changed since the baseline (the first sample of a tree: all of them), and its deletions. |
-| initial sample | A tree's first sample: every directory of the tracked space; the baseline is empty, so nothing is pruned. |
-| incremental sample | Any later sample of a tree: it prunes the walk with the baseline and stores only changed directories and tombstones. |
+| initial sample | A sample against an empty baseline (the tree's first, or the first after every directory was deleted): every directory of the tracked space; nothing is pruned. |
+| incremental sample | Any sample against a non-empty baseline: it prunes the walk with the baseline and stores only changed directories and tombstones. |
 | baseline | A tree's current state read from the database before a sample's walk: each directory's last known row, possibly many samples old, plus the retry set. |
 | dir state | One directory's row in a sample (`trackdir.dir_state`): owner, mode, nlink, rstats or its error. It is stored only if the directory changed (or is a tombstone), so a sample holds a subset of the tree. |
 | current state | Each directory's latest dir state across a tree's samples, by `(started, id)` of the sample, without tombstoned paths (view `trackdir.current_dir_state`). |

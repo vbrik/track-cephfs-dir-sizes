@@ -10,9 +10,11 @@ is another tree with its own initial sample); the current-state view is
 revisited (it hides tombstoned paths, and "latest" means the greatest
 `(started, id)`); `SamplesExist` and the refusal of a second sample are replaced
 by incremental samples and by order and stale-baseline guards; the schema is
-version 2 (`tree.max_depth`, `tree.max_dirs`, `sample.changed`, `sample.deleted`,
-`dir_state.deleted`), and `dir_state` rows are stored changes, not one row per
-directory. `TreeKey`, `tree_key_of` and `describe_tree` carry the two new fields.
+version 3 (`tree.max_depth`, `tree.max_dirs`, `dir_state.deleted`; `sample.max_depth`
+is dropped, and `dir_state.sample_id` no longer cascades on delete: see the
+incremental-sample spec's section 4), and `dir_state` rows are stored changes,
+not one row per directory. `TreeKey`, `tree_key_of` and `describe_tree` carry
+the two new fields.
 
 ## 1. Goal and scope
 

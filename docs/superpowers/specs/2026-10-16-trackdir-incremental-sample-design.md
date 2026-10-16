@@ -18,8 +18,8 @@ In scope:
 - pruning the walk with the baseline, live and in `--replay`
 - storing changed directories and recording deleted ones
 - retrying directories that had errors
-- schema version 2: deletion records, new `sample` columns, a new current-state
-  view
+- schema version 2 (amended to 3 after review, section 4): deletion records, a
+  new current-state view
 - tree identity extended with `max_depth` and `max_dirs` (section 2)
 - guards: sample order, a baseline that went stale during the walk
 - the CLI summary and documentation changes
@@ -42,14 +42,14 @@ and the "future rctime acts as pinned" rule (dropped: unnecessary, section 3).
 |---|---|
 | Change rule | A directory is *unchanged* iff its probe's row equals its baseline row in every `dir_state` column except `sample_id` and `path` (ino, mode, uid, gid, nlink, rctime, rbytes, rfiles, rsubdirs, error stage and code). Changed directories are stored and listed; unchanged ones are neither (their subtree is pruned). |
 | No separate "monitored" set | One rule replaces "monitored attributes" and "future rctime counts as pinned". `getxattr` mode already reads all four rstats, so comparing them costs nothing extra. |
-| Deletions | New column `dir_state.deleted boolean`; schema version 2, no migration code (no real database exists). One tombstone row per deleted directory, including every baseline descendant. The current-state view hides tombstoned paths. A path created again later gets an ordinary row. |
+| Deletions | New column `dir_state.deleted boolean`; schema version 2 (3 after the review amendment of section 4), no migration code (no real database exists). One tombstone row per deleted directory, including every baseline descendant. The current-state view hides tombstoned paths. A path created again later gets an ordinary row. |
 | Errors | Error rows are stored as changes. A directory whose baseline row, or any baseline descendant's row, has an error is never pruned, so errors are retried every sample. |
 | Tree identity | Amends the initial-sample spec: a tree is (cluster fsid, filesystem name, `fs_path`, **`max_depth`**, **`max_dirs`**), the last two being the values the sample was run with (user's decision). A run with a different `--max-depth` or `--max-dirs` than any existing tree's belongs to a different tree: it takes a full initial sample and never sees the other tree's baseline. There is no depth guard and no way to "change" a tree's depth; deepening is a new tree. |
 | Stale baseline | The baseline is read before the walk; no connection is held during it. At store time the tree row is locked and the store fails if the tree's latest sample is not the one the baseline came from. |
 | Sample order | A sample whose `started` is not later than the tree's latest sample's `started` is refused, because the current-state view orders by `started`. |
 | Baseline loading | The whole current state of the tree is read into memory (a dict) before the walk, through the view. No new index now; section 8 measures. |
 | CLI | No new flag. `sample` takes an initial sample if the tree has none, an incremental one otherwise. The summary says which, and reports probed, changed, deleted and pruned counts. |
-| `sample` row counts | `dirs` and `errors` keep meaning *probed* directories (they come from the header). New columns `changed` and `deleted` count stored rows. |
+| `sample` row counts | `dirs` and `errors` keep meaning *probed* directories (they come from the header). Counts of stored rows are not kept on `sample` (dropped in version 3): count the sample's `dir_state` rows, tombstones apart. |
 
 ## 3. The algorithm
 
@@ -62,9 +62,11 @@ non-deleted `dir_state` row (the view). A **row** is a probe's values for the
 `walker.walk` is unchanged. The walk's `should_list(probe)` (called with a
 probe that has no children yet) becomes:
 
-    probe.depth < max_depth
-    and (row(probe) != baseline.rows.get(probe.path)   # changed, or new
-         or probe.path in baseline.retry)
+    (row(probe) != baseline.rows.get(probe.path)   # changed, or new
+     or probe.path in baseline.retry)
+
+`walk_within` applies the depth bound (`probe.depth < max_depth`) to this and
+to every other predicate (section 6).
 
 - A directory with no baseline row is new: its row differs from `None`, so it
   is listed.
@@ -100,8 +102,9 @@ After the walk, from the probes (all directories read) and the baseline:
   stored as an error row. `ENOENT` with no baseline row (created and removed
   within one walk) stores nothing.
 - A listing is trusted as complete only if it really read the directory or
-  `nlink` and `rsubdirs` agree that there are no subdirectories (section 6,
-  `probe.py`). A false "no subdirectories" would tombstone a whole subtree.
+  `nlink == 2` and `rsubdirs == 1` agree that there are no subdirectories
+  (section 6, `probe.py`); a failed rstats read confirms nothing, so that
+  directory is read. A false "no subdirectories" would tombstone a whole subtree.
 - Nothing is tombstoned below a directory that was not listed: pruned
   directories, directories at max depth, and directories that failed to open or
   to list. Their descendants keep their state.
@@ -110,8 +113,10 @@ After the walk, from the probes (all directories read) and the baseline:
 ### 3.3 Guards (checked before the walk, rechecked at store)
 
 Pre-check, in this order, each fatal with `ERROR:` and nothing stored: schema
-current; for `--replay`, the capture's `started` is later than the tree's
-latest sample's (refuse otherwise).
+current; the run's `started` is later than the tree's latest sample's (refuse
+otherwise). A replay uses the capture's `started`; a live run uses the current
+time, which is earlier than the real start, so it never refuses falsely but
+catches a latest sample dated in the future.
 
 Store (one transaction): lock the tree row; fail if the tree's latest sample
 (by `started DESC, id DESC`) is not the baseline's sample, or if the new
@@ -120,13 +125,17 @@ was stored during the walk (or that the sample is older than the tree's
 latest) and that nothing was stored. For an initial sample the baseline's
 sample is "none".
 
-## 4. Schema version 2
+## 4. Schema version 2 (amended: version 3)
 
-`SCHEMA_VERSION = 2`; `db init` creates version 2; a version-1 database is
-rejected like any other version (drop and re-init; no migration, as no real
-database exists yet).
+`SCHEMA_VERSION = 3`; `db init` creates version 3; any other version is
+rejected (drop and re-init; no migration, as no real database exists yet).
+Version 2 was the schema as first designed below. The review of the
+incremental-sample commits amended it to version 3: `sample` loses `max_depth`,
+`changed` and `deleted` (bullets below), and `dir_state.sample_id` no longer
+cascades on delete.
 
-Changes against the initial-sample spec §5:
+Changes against the initial-sample spec §5, as first designed (the listing
+below shows version 2's `sample` counters; version 3 has none):
 
 ```sql
 -- tree: two key columns; the unique constraint covers all five
@@ -157,17 +166,29 @@ WHERE NOT deleted;
   because it changed"; they are no longer one per probed directory. Docs and
   comments that say otherwise are updated.
 - `sample.dirs` is the number of probed directories, `errors` the probed
-  directories with an error. `changed` counts the non-tombstone rows stored
-  and `deleted` the tombstones (builder's call). They need not equal `dirs`:
-  an `open ENOENT` probe counts in `dirs` and `errors` but stores no row, so
-  for an initial sample `changed <= dirs`, with equality unless a directory
-  vanished during the walk. Tests assert the counters against the stored
-  rows, not against `dirs`.
-- `sample.max_depth` now always equals its tree's; it stays so that a
-  sample row is self-describing (builder's call). `max_dirs` is stored on the
-  tree only: the capture header has no such field and the format is not
+  directories with an error. Version 2 also had `changed` (non-tombstone rows
+  stored) and `deleted` (tombstones stored) on `sample`, and `max_depth`;
+  version 3 drops all three because each is derivable (`max_depth` always
+  equals its tree's; the counts are counts of the sample's `dir_state` rows)
+  and a stored copy could silently disagree with the rows. `SampleResult`
+  still reports `changed` and `deleted`, from the diff. They need not equal
+  `dirs`: an `open ENOENT` probe counts in `dirs` and `errors` but stores no
+  row, so for an initial sample the rows stored are at most `dirs`, with
+  equality unless a directory vanished during the walk. `max_dirs` is stored on
+  the tree only: the capture header has no such field and the format is not
   changed. A replay takes `max_dirs` from `--max-dirs` (default 1,000,000),
   like a live run.
+- A sample's `dir_state` rows are changes, not a listing, so a sample cannot be
+  deleted alone: deleting one would drop the only row of every directory
+  unchanged since (it would vanish from the view; the next sample would store
+  it as new) and could resurrect a path whose tombstone it held. Version 3's
+  `dir_state.sample_id` foreign key therefore has no `ON DELETE CASCADE`, and
+  deleting a sample that has rows fails. A tree is removed by deleting its
+  `dir_state` rows, then its samples, then the tree row. There is no retention
+  policy; expiring old samples would first need their rows merged forward.
+- The `--max-depth` and `--max-dirs` options are capped at PostgreSQL's
+  `integer` and `bigint` maxima (the columns' types), so an out-of-range value
+  fails as a usage error rather than at the store, after the walk.
 - The latest sample of a tree is defined everywhere as the one with the
   greatest `(started, id)`. Because of the order guard this is also the
   greatest `id`.
@@ -204,12 +225,13 @@ above max depth that were not listed: `children is None`, no error,
 - **New pure module `src/trackdir/baseline.py`** (no psycopg, no I/O):
   `Baseline` (rows by path, retry set, the baseline sample's id and
   `started`, or an empty baseline for a tree with no samples);
-  `should_list_changed(baseline, max_depth) -> ShouldList`;
-  `diff(baseline, probes) -> SampleDiff` giving changed rows and tombstone
-  paths (section 3.2); `retry_paths(rows)`. The tombstone computation walks
-  the baseline's paths in `tree_key` order.
+  `should_list_changed(baseline) -> ShouldList`; `diff(baseline, probes,
+  max_depth) -> SampleDiff` giving changed rows, tombstone paths (section 3.2)
+  and the number of skipped directories. The retry set is built by
+  `Baseline.build`. The tombstone computation follows the baseline's `children`
+  map.
 - **`db.py`**: `load_baseline(conn, key) -> Baseline`; `store_sample(conn,
-  header, diff, baseline_sample_id, replayed_from) -> int` replaces
+  header, key, baseline, diff, replayed_from) -> int` replaces
   `store_initial_sample` and `has_samples`; `SamplesExist` is replaced by an
   error for the stale baseline / order guard (one `DbError` subclass with the
   facts the message needs). DDL changes as in section 4; `DIR_STATE_COLUMNS`
@@ -221,16 +243,20 @@ above max depth that were not listed: `children is None`, no error,
   them.
 - **`probe.py`** (builder's call, from the builder check): the `nlink == 2`
   shortcut (`children=()` without a readdir) is taken only if the probe's
-  `rsubdirs` is None (rstats failed) or 1 (the directory itself). If
-  `rsubdirs` says there are subdirectories, the directory is read. Measured
+  `rsubdirs` is 1 (the directory itself). If `rsubdirs` says there are
+  subdirectories, or rstats failed and there is nothing to confirm `nlink`,
+  the directory is read. (The first version also trusted `nlink` when rstats
+  had failed; the review closed that gap.) Measured
   on the three committed fixtures: 34,933 directories with `nlink == 2`, all
   with `rsubdirs == 1`, and no listed directory with `len(children) !=
   nlink - 2`, so the guard costs no extra reads in practice. It matters now
   because a wrong empty listing would tombstone a subtree. Tests: a fake
   directory with `nlink == 2` and `rsubdirs == 3` is read, not shortcut.
-- **`live.py`**: `walk_within` and `walk_live` take the `ShouldList` instead of
-  deriving `list_above(max_depth)`; `capture` passes `list_above`. The
-  walker and `model.py` are unchanged except what they export.
+- **`live.py`**: `walk_within` and `walk_live` take an optional `ShouldList`
+  (None: list everything above max depth). `walk_within` itself combines it
+  with `list_above(max_depth)`, so no walk lists a directory at max depth
+  whatever the predicate says; `should_list_changed` does not repeat the
+  bound. The walker and `model.py` are unchanged except what they export.
 - Tombstone and changed-row construction are pure and tested without a
   database.
 
@@ -242,7 +268,7 @@ No test needs Ceph, root or a database unless it opts in (as before).
 |---|---|
 | `baseline` (pure) | retry set = error paths plus ancestors; `should_list`: new dir listed, changed listed, unchanged pruned, at max depth never listed, error-retry listed; `diff`: unchanged stores nothing; changed and new stored; error rows stored; listed parent missing a baseline child tombstones it and all its baseline descendants; `open ENOENT` tombstones and stores no error row; ENOENT with no baseline stores nothing; nothing tombstoned below pruned, max-depth, unopenable or unlistable directories; recreated path after tombstone is stored |
 | Incremental replay (pure, no DB) | replay a fixture, then a copy edited in memory (a changed rbytes/rctime chain, a removed subtree, a new directory): the walk reads only the changed chains and `diff` matches the edits; replaying an unmodified capture a second time reads only ROOT plus the retry chains of error directories |
-| Schema v2 (opt-in DB) | `db init` creates v2 and is idempotent; a v1 schema is rejected; the CHECK on tombstones; the view hides tombstones and returns the latest row per path |
+| Schema v3 (opt-in DB) | `db init` creates v3 and is idempotent; another version is rejected; deleting a sample that has rows fails, and a tree is removed rows first; a tree's samples consume one tree id; the CHECK on tombstones; the view hides tombstones and returns the latest row per path |
 | Incremental sample (opt-in DB) | trees differing only in `max_depth` or only in `max_dirs` are distinct (the second run is an initial sample and does not see the first's baseline); initial then unchanged: counts `changed 0`; edit then sample: only edited rows stored, view equals the edited capture's state; deletion: tombstones stored and view hides them; recreation shows the new row; error row retried and replaced by a good row once the directory is readable; stale baseline (a sample stored between pre-check and store) fails and stores nothing; older `started` refused; a failed store (e.g. COPY error) stores nothing |
 | CLI | summary says initial vs incremental; `--help` text; messages for the guards (whitespace collapsed) |
 
@@ -251,7 +277,7 @@ walking" and "round trip of the walk" change to the incremental cases above;
 the round trip becomes "baseline plus stored rows reproduces the walk".
 
 **Manual acceptance** (dev container, replay only, as in the initial-sample
-spec, so real names stay out of the dev database): `db init` (version 2),
+spec, so real names stay out of the dev database): `db init` (version 3),
 `sample --replay tests/data/ceph1-sub-depth4.jsonl.gz`, then the same replay
 again must fail on the order guard (same `started`); so for the acceptance a
 second capture is needed, or a copy of the fixture with a later `started`
@@ -303,12 +329,15 @@ samples: only changed rows were added, and the view returns one row per path.
 Verdict:
 
 - **Load time: no index needed.** 0.26 s per 100k is an order of magnitude under
-  the "a few seconds per 100k" threshold. Caveat: the view exposes `tree_id`
-  (from `sample`), but `dir_state` has none, so loading one tree's baseline
-  still scans every `dir_state` row of all trees and the time grows with the
-  database's total history, not the tree's size. This measurement had one tree
-  and six samples. Revisit when the database holds many trees or many
-  samples.
+  the "a few seconds per 100k" threshold. The view exposes `tree_id` (from
+  `sample`), and `WHERE tree_id = X` is pushed into the view's `DISTINCT ON`
+  subquery (`tree_id` is one of its `DISTINCT ON` columns). `EXPLAIN` on a
+  database with three trees shows a filtered scan of `sample` followed by a
+  nested loop into `dir_state_pkey` by `sample_id`, so only that tree's rows
+  are read. (The first version of this note claimed that every `dir_state` row
+  was scanned; the review corrected it.) The `sample` scan still grows with the
+  number of samples. The timing measurement itself had one tree and six
+  samples; revisit when the database holds many samples.
 - **`diff`: no concern.** Under 0.1 s for 72k probes; about 15 ms for a realistic
   incremental walk.
 - **Memory: the threshold is reached, and an index would not help.** The
@@ -334,6 +363,7 @@ Verdict:
   extended, view revisited, `SamplesExist` replaced, schema version 2);
   `TreeKey`, `tree_key_of` and `describe_tree` gain the two fields (the key
   is built from the header plus `max_dirs`, which is not in the header).
+- Review amendment (schema version 3): section 4.
 
 ## 10. Risks and open items
 
@@ -368,7 +398,10 @@ Verdict:
   tree with a full initial sample, exactly when that is most expensive, and
   the history is split. Recommendation recorded here, not applied: key on
   `max_depth` only and treat `max_dirs` as a per-run guard. Applied as the
-  user decided; revisit if it bites.
+  user decided, and confirmed after the review of these commits (2026-10-16):
+  the key keeps `max_dirs`, and the limit error now says plainly that raising
+  `--max-dirs` or changing `--max-depth` starts a new tree and leaves this
+  tree's history behind. Revisit if it bites.
 - **One ROOT, several trees.** Different `max_depth` or `max_dirs` store the
   same directories again under another tree; nothing links them. Readers of
   the database must pick one tree.

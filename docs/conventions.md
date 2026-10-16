@@ -18,6 +18,8 @@
   `read`, because readdir on the same fd may follow.
 - Messages go to stderr as one wrapped paragraph each, prefixed `ERROR:` or
   `WARNING:`; stdout carries results only.
+- `walk_within` alone enforces the depth limit: no directory at max depth is
+  listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);
   `sample.py` turns them into `FatalError` messages, in one place.
 - Tests need neither Ceph nor root. Real CephFS data enters tests only as
@@ -31,6 +33,9 @@
   directory only if its row differs from the baseline, plus tombstones
   (`deleted` rows with every value NULL) for deleted paths. Read a tree's state
   through `trackdir.current_dir_state`, never by taking the rows of one sample.
+  For the same reason samples are not deleted individually: `dir_state.sample_id`
+  has no `ON DELETE CASCADE`. Counts of what a sample stored are counted from
+  its `dir_state` rows, not stored on `sample`.
 - A tree's latest sample is the one with the greatest `(started, id)`, in the
   baseline, the view, the order guard and the stale-baseline check alike. A sample
   must start later than the latest one, so this is also the greatest `id`.

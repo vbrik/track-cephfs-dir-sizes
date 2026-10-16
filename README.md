@@ -69,9 +69,9 @@ with `zcat FILE | jq`.
     trackdir sample /mnt/cephfs/projects --max-depth 3   # run it again and again
     trackdir sample --replay projects.jsonl.gz           # from a capture
 
-`db init` creates the tables in schema `trackdir` (schema version 2); repeating
-it changes nothing. A version-1 database is refused: drop schema `trackdir` and
-run `db init` again (there is no migration).
+`db init` creates the tables in schema `trackdir` (schema version 3); repeating
+it changes nothing. A database at another version is refused: drop schema
+`trackdir` and run `db init` again (there is no migration).
 
 `sample` reads ROOT's directories down to `--max-depth`, as `capture` does, and
 stores them as a sample of ROOT's tree. A tree is a directory of a CephFS
@@ -79,8 +79,8 @@ filesystem: cluster fsid, filesystem name, path inside the filesystem, and the
 `--max-depth` and `--max-dirs` the sample ran with. It is the same whichever
 host or mount point samples it.
 
-- **Initial sample.** A tree with no samples gets one that stores every
-  directory.
+- **Initial sample.** A tree with no current state (no samples, or every
+  directory deleted) gets one that stores every directory.
 - **Incremental sample.** Otherwise `sample` loads the tree's current state (its
   baseline) from the database, and lists a directory's children only if the
   directory differs from the baseline in some stored column (ino, mode, uid,
@@ -93,7 +93,11 @@ host or mount point samples it.
   former descendants.
   Unchanged directories store nothing, so `trackdir.dir_state` holds changes,
   not a listing; `trackdir.current_dir_state` (a view) gives each directory's
-  latest state, without deleted ones.
+  latest state, without deleted ones. For the same reason a sample cannot be
+  deleted on its own: the database refuses to delete a sample that has rows,
+  because directories unchanged since would lose their only row. To remove a
+  tree, delete its `trackdir.dir_state` rows, then its `trackdir.sample` rows,
+  then its `trackdir.tree` row. There is no retention policy.
 
 The summary on stderr says which kind it was, e.g. (placeholders):
 
@@ -113,7 +117,10 @@ never sees the other tree's baseline. There is no way to deepen a tree, and
 one ROOT sampled at two depths is stored twice, with nothing linking the
 copies; readers of the database must pick a tree. `--max-dirs` is a memory
 guard for a run, but it counts too, so if a large reorganization pushes a run
-over it, raising it starts a new tree.
+over it, the only way on is a higher `--max-dirs`, which starts a new tree with
+a full initial sample and leaves this tree's history behind. `--max-depth` is
+at most 2147483647 and `--max-dirs` at most 9223372036854775807 (the database
+column types).
 
 Run `sample` as root for a complete sample. As another user it is partial:
 directories you cannot read are stored as errors (EACCES) without rstats. Their
