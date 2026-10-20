@@ -28,7 +28,7 @@ from trackdir.db import (
     TreeStats,
     summarize,
 )
-from trackdir.dbcli import tree_identity
+from trackdir.dbcli import display_path, tree_identity
 from trackdir.model import ROOT, DirProbe, ProbeError, Stage, split
 from trackdir.summary import format_bytes, render_json, render_text
 
@@ -402,6 +402,22 @@ def test_render_text_escapes_undecodable_paths():
     text.encode()
     assert "path /caf\\xe9, depth 4)\n" in text
     assert "    +1 B  caf\\xe9\n" in text
+
+
+@pytest.mark.parametrize(
+    ("path", "shown"),
+    [
+        (b"plain dir", "plain dir"),
+        (b"caf\xc3\xa9", "caf\u00e9"),
+        (b"caf\xe9", "caf\\xe9"),
+        (b"a\nb", "a\\nb"),
+        (b"\x1b[2Jx", "\\x1b[2Jx"),
+        (b"zero\xe2\x80\x8bwidth", "zero\\u200bwidth"),
+    ],
+)
+def test_display_path_is_printable(path, shown):
+    assert display_path(path) == shown
+    assert shown.isprintable()
 
 
 def test_render_json():

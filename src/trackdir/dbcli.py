@@ -111,11 +111,14 @@ def tree_identity(key: TreeKey) -> str:
 
 
 def display_path(path: bytes) -> str:
-    r"""Return PATH as UTF-8 text, with bytes that do not decode as \xNN.
+    r"""Return PATH as printable UTF-8 text for a terminal.
 
-    Unlike fsdecode's surrogates, the result can be written to any UTF-8 stream.
+    Bytes that do not decode become \xNN, and unprintable characters (newlines,
+    terminal escapes) their repr escapes, as directory names are anyone's to
+    choose. Unlike fsdecode's surrogates, the result suits any UTF-8 stream.
     """
-    return path.decode(errors="backslashreplace")
+    text = path.decode(errors="backslashreplace")
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
 
 
 def utc(moment: datetime) -> str:
