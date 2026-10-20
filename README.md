@@ -22,10 +22,17 @@ by size growth are not written yet.
 
 ## Install
 
-    pip install .                # capture only
-    pip install '.[postgres]'    # also sample and db init (adds psycopg)
+Clone the repository and install it in editable mode, preferably into a
+virtual environment:
 
-Or run from a checkout without installing: `PYTHONPATH=src python3 -m trackdir`.
+    git clone <repository-url> && cd track-cephfs-dir-sizes
+    python3 -m venv venv && . venv/bin/activate
+    pip install -e .                # capture only
+    pip install -e '.[postgres]'    # also sample and db init (adds psycopg)
+
+This puts `trackdir` on `PATH` while the environment is active. To use it
+without activating, run `venv/bin/trackdir` or symlink that file into a
+directory on `PATH`. To update, run `git pull`; no reinstall is needed.
 
 ## Capture directory state
 
