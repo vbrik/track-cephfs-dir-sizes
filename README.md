@@ -44,8 +44,8 @@ and writes only the output file, which appears only if the capture succeeds
 and is never overwritten. Run it as root for a complete capture: as another
 user, unreadable directories are recorded as EACCES errors.
 
-`--max-dirs` (default 1,000,000) stops the run before memory runs out;
-`--jobs` (default 16) sets how many directories are probed concurrently.
+`--max-dirs` (default 10,000,000) stops the run before memory runs out;
+`--jobs` (default 32) sets how many directories are probed concurrently.
 
 To share a capture, anonymize it with a secret key kept out of the
 repository. Captures taken with the same key line up. trackdir refuses a key
@@ -167,7 +167,7 @@ string or URI. Put the password in `~/.pgpass` or `PGPASSWORD`, never in
   used.
 - The baseline is held in memory, for all current directories of the tree:
   about 0.5 GB retained, and up to about 1.6 GB at peak while loading, per
-  million current directories. The default `--max-dirs` is 1,000,000, so large
+  million current directories. The default `--max-dirs` is 10,000,000, so large
   trees need RAM accordingly.
 
 ## Summarize the database
