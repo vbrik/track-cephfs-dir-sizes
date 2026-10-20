@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 
 import pytest
-from conftest import SUBTREE, collapse, must_not_walk
+from conftest import SUBTREE, Terminal, collapse, must_not_walk, status_phases
 
 from trackdir import dbcli, live, sample
 from trackdir.cli import main
@@ -21,6 +21,7 @@ from trackdir.db import (
 from trackdir.dbcli import describe_tree
 from trackdir.messages import FatalError
 from trackdir.model import ROOT, error_counts
+from trackdir.progress import Progress
 from trackdir.sample import (
     SampleOptions,
     SampleResult,
@@ -104,7 +105,7 @@ def test_dsn_from_environment(monkeypatch, tree):
     monkeypatch.setenv("TRACKDIR_DB", "x")
     seen = []
 
-    def fake_run_sample(opts, warn):
+    def fake_run_sample(opts, warn, progress):
         seen.append(opts)
         raise FatalError("stop")
 
@@ -123,7 +124,7 @@ def test_db_option_overrides_environment(monkeypatch):
 
 
 def test_interrupt_says_nothing_was_stored(monkeypatch, capsys):
-    def interrupted(opts, warn):
+    def interrupted(opts, warn, progress):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(sample, "run_sample", interrupted)
@@ -403,3 +404,34 @@ def test_live_second_sample_is_pruned_by_the_baseline(db, dsn, tree, fake_ceph, 
         " LEFT JOIN trackdir.dir_state d ON d.sample_id = s.id"
         " GROUP BY s.id ORDER BY s.id"
     ).fetchall() == [(1, 5, 5, 0), (2, 1, 0, 0)]
+
+
+def test_replay_reports_each_phase(db, dsn):
+    sample.run_db_init(dsn)
+    stream = Terminal()
+    opts = SampleOptions(dsn=dsn, replay=SUBTREE)
+    result = run_sample(opts, print, progress=Progress(stream))
+    assert status_phases(stream.getvalue()) == [
+        "loading the capture",
+        "loading the baseline",
+        "probed",
+        "comparing with the baseline",
+        f"storing {result.changed:,} directories and 0 deletions",
+    ]
+
+
+def test_live_sample_erases_its_progress_before_the_summary(
+    db, dsn, tree, fake_ceph, monkeypatch
+):
+    sample.run_db_init(dsn)
+    stderr = Terminal()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    assert main(["sample", str(tree), "--max-depth", "2", "--db", dsn]) == 0
+    progress, summary = stderr.getvalue().rsplit("\r\x1b[K", 1)
+    assert status_phases(progress) == [
+        "loading the baseline",
+        "probed",
+        "comparing with the baseline",
+        "storing 4 directories and 0 deletions",
+    ]
+    assert summary.startswith("Stored sample 1")

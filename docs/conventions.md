@@ -18,6 +18,11 @@
   `read`, because readdir on the same fd may follow.
 - Messages go to stderr as one wrapped paragraph each, prefixed `ERROR:` or
   `WARNING:`; stdout carries results only.
+- The one exception is the progress status line (`progress.Progress`): stderr
+  only, only on a terminal, redrawn in place. It is erased before any message:
+  on exit from its `with` block, and by the warn callback (`cli._warner`).
+  Anything else that writes to stderr during a run calls `Progress.clear()`
+  first.
 - `walk_within` alone enforces the depth limit: no directory at max depth is
   listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);

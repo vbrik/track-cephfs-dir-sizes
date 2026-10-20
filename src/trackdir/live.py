@@ -29,6 +29,7 @@ from trackdir.model import (
 )
 from trackdir.mount import MountError, identify
 from trackdir.probe import LiveBackend
+from trackdir.progress import NO_PROGRESS, Progress
 from trackdir.rstats import (
     NotCephFSError,
     RStatMode,
@@ -117,13 +118,14 @@ def walk_within(
     jobs: int,
     should_list: ShouldList | None = None,
     limit_advice: str = DEFAULT_LIMIT_ADVICE,
+    progress: Progress = NO_PROGRESS,
 ) -> list[DirProbe]:
     """Walk BACKEND down to MAX_DEPTH and return the probes in tree order.
 
     SHOULD_LIST decides which directories above MAX_DEPTH to list (None: all of
-    them); no directory at MAX_DEPTH is listed whatever it says. Raises
-    FatalError, ending in LIMIT_ADVICE, if more than MAX_DIRS directories are
-    probed.
+    them); no directory at MAX_DEPTH is listed whatever it says. Reports to
+    PROGRESS as walk does. Raises FatalError, ending in LIMIT_ADVICE, if more
+    than MAX_DIRS directories are probed.
     """
     above = list_above(max_depth)
     if should_list is None:
@@ -134,7 +136,7 @@ def walk_within(
             return above(probe) and should_list(probe)
 
     try:
-        return walk(backend, listed, max_dirs=max_dirs, jobs=jobs)
+        return walk(backend, listed, max_dirs=max_dirs, jobs=jobs, progress=progress)
     except DirLimitExceeded as e:
         raise FatalError(
             f"ROOT has more than {e.limit} directories within depth "
@@ -150,6 +152,7 @@ def walk_live(
     jobs: int,
     should_list: ShouldList | None = None,
     limit_advice: str = DEFAULT_LIMIT_ADVICE,
+    progress: Progress = NO_PROGRESS,
 ) -> LiveWalk:
     """Walk LIVE.safe_root as walk_within does and build the header (anonymized=False).
 
@@ -167,6 +170,7 @@ def walk_live(
         jobs=jobs,
         should_list=should_list,
         limit_advice=limit_advice,
+        progress=progress,
     )
     elapsed = time.monotonic() - clock
     header = CaptureHeader(

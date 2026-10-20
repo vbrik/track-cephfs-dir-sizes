@@ -1,13 +1,14 @@
 import os
 import signal
+import sys
 import time
 from collections import Counter
 from pathlib import Path
 
 import pytest
-from conftest import collapse, must_not_walk
+from conftest import Terminal, collapse, must_not_walk, status_phases
 
-from trackdir import live
+from trackdir import cli, live
 from trackdir.anonymize import key_recipe
 from trackdir.capture import load_capture
 from trackdir.cli import (
@@ -19,6 +20,7 @@ from trackdir.cli import (
     run_capture,
 )
 from trackdir.mount import MountError
+from trackdir.progress import Progress
 from trackdir.rstats import RStatMode
 
 
@@ -328,3 +330,47 @@ def test_usage_errors_exit_2(args):
     with pytest.raises(SystemExit) as exc:
         main(args)
     assert exc.value.code == 2
+
+
+def test_capture_reports_walk_and_write(tree, tmp_path, fake_ceph):
+    stream = Terminal()
+    run_capture(options(tree, tmp_path), print, progress=Progress(stream))
+    walking, writing = status_phases(stream.getvalue())
+    assert walking == "probed"
+    assert f"writing {tmp_path / 'out.jsonl.gz'}".startswith(writing)  # cut to fit
+
+
+def test_main_erases_the_progress_line_before_the_summary(
+    tree, tmp_path, fake_ceph, monkeypatch
+):
+    stderr = Terminal()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    out = tmp_path / "o.jsonl.gz"
+    assert main(["capture", str(tree), "--max-depth", "1", "-o", str(out)]) == 0
+    progress, summary = stderr.getvalue().rsplit("\r\x1b[K", 1)
+    walking, writing = status_phases(progress)
+    assert walking == "probed"
+    assert f"writing {out}".startswith(writing)  # cut to fit
+    assert summary.startswith("Captured 3 directories")
+
+
+def test_main_erases_the_progress_line_before_an_error(
+    tree, tmp_path, fake_ceph, monkeypatch
+):
+    stderr = Terminal()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    out = tmp_path / "o.jsonl.gz"
+    status = main(
+        ["capture", str(tree), "--max-depth", "2", "-o", str(out), "--max-dirs", "2"]
+    )
+    assert status == 1
+    assert stderr.getvalue().rsplit("\r\x1b[K", 1)[1].startswith("ERROR: ROOT has")
+
+
+def test_warning_erases_the_progress_line_first(monkeypatch):
+    stderr = Terminal()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    progress = Progress(stderr)
+    progress.phase("loading the baseline")
+    cli._warner(progress)("slow")
+    assert stderr.getvalue() == "\rloading the baseline\x1b[K\r\x1b[KWARNING: slow\n"

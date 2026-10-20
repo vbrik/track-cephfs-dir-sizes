@@ -118,6 +118,12 @@ the unreadable directories of a non-root run (below) are probed again by every
 sample, so they are in that number every time. "Unchanged subtrees skipped" are
 directories above max depth that were not listed.
 
+While `sample` or `capture` runs on a terminal, one status line on stderr shows
+the current step (loading the baseline, storing, …) or the walk's counts, e.g.
+`probed 412,331 dirs, 1,204 queued, 3 errors, 2,148 dirs/s, 3m12s`; queued
+directories are found but not yet probed. The line is erased before any other
+message. When stderr is not a terminal, nothing is shown.
+
 `--max-depth` and `--max-dirs` are part of the tree's identity. A run with
 another value of either is a different tree: it takes a full initial sample and
 never sees the other tree's baseline. There is no way to deepen a tree, and

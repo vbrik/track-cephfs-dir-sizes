@@ -48,6 +48,7 @@ from trackdir.live import (
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
 from trackdir.model import DirProbe, ShouldList, error_counts
+from trackdir.progress import NO_PROGRESS, Progress
 
 # Ends the message of a walk over --max-dirs. The limit is part of the tree's
 # identity, so the only way past it forfeits the incremental baseline.
@@ -109,14 +110,16 @@ def replay_walk(
     max_depth: int,
     max_dirs: int,
     should_list: ShouldList | None = None,
+    progress: Progress = NO_PROGRESS,
 ) -> tuple[CaptureHeader, list[DirProbe]]:
     """Walk CAPTURE down to MAX_DEPTH; return its header and the probes.
 
-    SHOULD_LIST is as in walk_within (None: list everything above MAX_DEPTH).
-    The header keeps everything that describes the run that read the
-    filesystem (times, host, trackdir_version, anonymized); max_depth, dirs
-    and errors describe this walk. Raises FatalError if MAX_DEPTH exceeds the
-    capture's or more than MAX_DIRS directories are probed.
+    SHOULD_LIST and PROGRESS are as in walk_within (SHOULD_LIST None: list
+    everything above MAX_DEPTH). The header keeps everything that describes the
+    run that read the filesystem (times, host, trackdir_version, anonymized);
+    max_depth, dirs and errors describe this walk. Raises FatalError if
+    MAX_DEPTH exceeds the capture's or more than MAX_DIRS directories are
+    probed.
     """
     probes = walk_within(
         _replay_backend(capture, max_depth),
@@ -125,6 +128,7 @@ def replay_walk(
         jobs=1,
         should_list=should_list,
         limit_advice=SAMPLE_LIMIT_ADVICE,
+        progress=progress,
     )
     header = replace(
         capture.header,
@@ -135,22 +139,33 @@ def replay_walk(
     return header, probes
 
 
-def run_sample(opts: SampleOptions, warn: Callable[[str], None]) -> SampleResult:
+def run_sample(
+    opts: SampleOptions,
+    warn: Callable[[str], None],
+    *,
+    progress: Progress = NO_PROGRESS,
+) -> SampleResult:
     """Store a sample of the tree at opts.root or in opts.replay.
 
     The sample is initial if the tree's baseline is empty, else incremental. Calls
-    WARN once per degraded mode of a live ROOT, before walking. Raises
-    FatalError, before walking if the database cannot take the sample;
-    KeyboardInterrupt propagates. A sample is stored only if this returns.
+    WARN once per degraded mode of a live ROOT, before walking. Shows each step
+    and the walk's counts on PROGRESS. Raises FatalError, before walking if the
+    database cannot take the sample; KeyboardInterrupt propagates. A sample is
+    stored only if this returns.
     """
     if opts.replay is None:
-        walked = _walk_live(opts, warn)
+        walked = _walk_live(opts, warn, progress)
         replayed_from = None
     else:
-        walked = _walk_replay(opts)
+        walked = _walk_replay(opts, progress)
         replayed_from = str(opts.replay.resolve())
     header, baseline = walked.header, walked.baseline
+    progress.phase("comparing with the baseline")
     sample_diff = diff(baseline, walked.probes, header.max_depth)
+    progress.phase(
+        f"storing {len(sample_diff.changed):,} directories and "
+        f"{len(sample_diff.deleted):,} deletions"
+    )
     clock = time.monotonic()
     with database(opts.dsn, NOTHING_STORED) as conn:
         sample_id = store_sample(
@@ -216,7 +231,9 @@ def render_db_init(created: bool) -> str:
     )
 
 
-def _walk_live(opts: SampleOptions, warn: Callable[[str], None]) -> _Walk:
+def _walk_live(
+    opts: SampleOptions, warn: Callable[[str], None], progress: Progress
+) -> _Walk:
     """Pre-check, then walk opts.root pruned by the baseline."""
     assert opts.root is not None and opts.max_depth is not None
     with open_live_root(opts.root, warn) as live:
@@ -230,6 +247,7 @@ def _walk_live(opts: SampleOptions, warn: Callable[[str], None]) -> _Walk:
         # The real start is later than now, so this order check never refuses
         # falsely; it fails before the walk if the tree's latest sample is
         # dated in the future (clock skew, or another host sampled the tree).
+        progress.phase("loading the baseline")
         baseline = _precheck(opts.dsn, key, datetime.now(UTC))
         walked = walk_live(
             live,
@@ -238,22 +256,25 @@ def _walk_live(opts: SampleOptions, warn: Callable[[str], None]) -> _Walk:
             jobs=opts.jobs,
             should_list=should_list_changed(baseline),
             limit_advice=SAMPLE_LIMIT_ADVICE,
+            progress=progress,
         )
     return _Walk(walked.header, key, baseline, walked.probes, walked.elapsed)
 
 
-def _walk_replay(opts: SampleOptions) -> _Walk:
+def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
     """Pre-check, then walk opts.replay pruned by the baseline."""
     assert opts.replay is not None
+    progress.phase("loading the capture")
     capture = _load(opts.replay)
     max_depth = capture.header.max_depth if opts.max_depth is None else opts.max_depth
     _replay_backend(capture, max_depth)  # fails on the depth before the pre-check
     key = tree_key_of(replace(capture.header, max_depth=max_depth), opts.max_dirs)
     started = datetime.fromisoformat(capture.header.started)
+    progress.phase("loading the baseline")
     baseline = _precheck(opts.dsn, key, started)
     clock = time.monotonic()
     header, probes = replay_walk(
-        capture, max_depth, opts.max_dirs, should_list_changed(baseline)
+        capture, max_depth, opts.max_dirs, should_list_changed(baseline), progress
     )
     return _Walk(header, key, baseline, probes, time.monotonic() - clock)
 

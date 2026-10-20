@@ -22,6 +22,7 @@ from trackdir.live import (
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
 from trackdir.model import MAX_DEPTH_LIMIT, MAX_DIRS_LIMIT, DirProbe, error_counts
+from trackdir.progress import NO_PROGRESS, Progress
 from trackdir.rstats import RStatMode
 
 NO_CAPTURE = "no capture was written"  # what a failed capture leaves
@@ -155,19 +156,30 @@ class _Terminated(BaseException):
         self.signum = signum
 
 
-def run_capture(opts: CaptureOptions, warn: Callable[[str], None]) -> CaptureResult:
+def run_capture(
+    opts: CaptureOptions,
+    warn: Callable[[str], None],
+    *,
+    progress: Progress = NO_PROGRESS,
+) -> CaptureResult:
     """Capture opts.root into opts.output and return what happened.
 
-    Calls WARN once per degraded mode, before walking. Raises FatalError;
-    KeyboardInterrupt propagates. The output file exists only if this returns.
+    Calls WARN once per degraded mode, before walking. Shows the walk's counts,
+    then the write, on PROGRESS. Raises FatalError; KeyboardInterrupt
+    propagates. The output file exists only if this returns.
     """
     _check_output(opts.output, opts.root)
     key = _load_key(opts.key_file) if opts.key_file is not None else None
     with open_live_root(opts.root, warn) as live, _create_writer(opts.output) as writer:
         result = walk_live(
-            live, max_depth=opts.max_depth, max_dirs=opts.max_dirs, jobs=opts.jobs
+            live,
+            max_depth=opts.max_depth,
+            max_dirs=opts.max_dirs,
+            jobs=opts.jobs,
+            progress=progress,
         )
         header, probes = result.header, result.probes
+        progress.phase(f"writing {opts.output}")
         if key is not None:
             header, probes = _anonymize(header, probes, key)
         _commit(writer, header, probes, opts.output)
@@ -223,7 +235,13 @@ def _prepare_capture(args: argparse.Namespace) -> _Command:
         jobs=_jobs(args),
         key_file=args.anonymize,
     )
-    return _Command(lambda: render_summary(run_capture(opts, _warn)), NO_CAPTURE)
+
+    def run() -> str:
+        with Progress(sys.stderr) as progress:
+            result = run_capture(opts, _warner(progress), progress=progress)
+        return render_summary(result)
+
+    return _Command(run, NO_CAPTURE)
 
 
 def _prepare_sample(args: argparse.Namespace) -> _Command:
@@ -245,10 +263,13 @@ def _prepare_sample(args: argparse.Namespace) -> _Command:
         max_dirs=args.max_dirs,
         jobs=_jobs(args),
     )
-    return _Command(
-        lambda: sample.render_sample_summary(sample.run_sample(opts, _warn)),
-        dbcli.NOTHING_STORED,
-    )
+
+    def run() -> str:
+        with Progress(sys.stderr) as progress:
+            result = sample.run_sample(opts, _warner(progress), progress=progress)
+        return sample.render_sample_summary(result)
+
+    return _Command(run, dbcli.NOTHING_STORED)
 
 
 def _prepare_db_init(args: argparse.Namespace) -> _Command:
@@ -371,8 +392,14 @@ def _commit(
         raise FatalError(f"cannot write {output}: {e.strerror}.") from e
 
 
-def _warn(message: str) -> None:
-    sys.stderr.write(paragraph(f"WARNING: {message}"))
+def _warner(progress: Progress) -> Callable[[str], None]:
+    """Return a warn callback that erases PROGRESS's line before each warning."""
+
+    def warn(message: str) -> None:
+        progress.clear()
+        sys.stderr.write(paragraph(f"WARNING: {message}"))
+
+    return warn
 
 
 def _int_between(minimum: int, maximum: int | None = None) -> Callable[[str], int]:

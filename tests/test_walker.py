@@ -5,9 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
+from conftest import Terminal, status_lines
 
 from trackdir import walker as walker_module
-from trackdir.model import ROOT, DirProbe, join
+from trackdir.model import ROOT, DirProbe, ProbeError, Stage, join
+from trackdir.progress import Progress
 from trackdir.walker import DirLimitExceeded, walk
 
 
@@ -124,3 +126,45 @@ def test_probes_in_flight_are_bounded(monkeypatch):
     probes = walk(TreeBackend(tree), above(10), max_dirs=1000, jobs=2)
     assert len(probes) == 201
     assert most <= 2 * walker_module.IN_FLIGHT_PER_JOB
+
+
+def test_progress_reports_the_start_and_every_probe():
+    class Failing(TreeBackend):
+        def probe(self, path, should_list):
+            probe = super().probe(path, should_list)
+            if path == b"b":
+                return replace(probe, error=ProbeError(Stage.OPEN, "EACCES"))
+            return probe
+
+    stream = Terminal()
+    walk(
+        Failing(TREE),
+        above(10),
+        max_dirs=100,
+        jobs=1,
+        progress=Progress(stream, interval=0),
+    )
+    counts = [line.split(", ")[:3] for line in status_lines(stream.getvalue())]
+    assert counts[0] == ["probed 0 dirs", "1 queued", "0 errors"]
+    assert counts[-1] == ["probed 6 dirs", "0 queued", "1 errors"]
+    assert len(counts) == 7
+
+
+def test_progress_keeps_reporting_while_a_probe_stalls(monkeypatch):
+    class Stalling(TreeBackend):
+        def probe(self, path, should_list):
+            time.sleep(0.3)
+            return super().probe(path, should_list)
+
+    monkeypatch.setattr(walker_module, "REPORT_INTERVAL", 0.01)
+    stream = Terminal()
+    walk(
+        Stalling({ROOT: []}),
+        above(10),
+        max_dirs=100,
+        jobs=1,
+        progress=Progress(stream, interval=0),
+    )
+    assert (
+        len(status_lines(stream.getvalue())) >= 5
+    )  # 2 without reports during the stall

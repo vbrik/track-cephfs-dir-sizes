@@ -1,3 +1,4 @@
+import io
 import os
 from collections.abc import Sequence
 from dataclasses import replace
@@ -20,6 +21,28 @@ SUBTREE = Path(__file__).parent / "data" / "ceph1-sub-depth4.jsonl.gz"
 
 def collapse(text: str) -> str:
     return " ".join(text.split())
+
+
+class Terminal(io.StringIO):
+    """A stream that claims to be a terminal; its width is unknown (no fileno)."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def status_lines(text: str) -> list[str]:
+    """Return each progress line drawn in TEXT, "" for an erasure."""
+    return [chunk.removesuffix("\x1b[K") for chunk in text.split("\r")[1:]]
+
+
+def status_phases(text: str) -> list[str]:
+    """Return the progress lines drawn in TEXT, each walk as one "probed"."""
+    shown: list[str] = []
+    for line in status_lines(text):
+        line = "probed" if line.startswith("probed ") else line
+        if line and shown[-1:] != [line]:
+            shown.append(line)
+    return shown
 
 
 @pytest.fixture(scope="module")
