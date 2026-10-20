@@ -586,20 +586,26 @@ GROUP BY tree_id, error_stage, error_code
 # the most from sample %(since)s, started at %(started)s, to the latest sample;
 # most first, ties by path. A path's state at a sample is its latest row up to
 # it, in the view's order. A path absent or tombstoned at the start is new and
-# grows from 0. Depth counts the "/" of the escaped path: escaping writes only
-# "\" and bytes outside printable ASCII differently.
+# grows from 0, but only if its nearest ancestor present at the start was
+# listed (no error, or rstats only, as in capture.is_listed): below an unlisted
+# one it may have existed unseen. Depth counts the "/" of the escaped path:
+# escaping changes only backslashes and bytes outside printable ASCII.
 _GROWTH = """WITH history AS (
-    SELECT d.path, d.rbytes, d.deleted, s.started, s.id
+    SELECT d.path, d.rbytes, d.error_stage, d.deleted, s.started, s.id,
+           CASE WHEN d.path = %(root)s THEN 0
+                ELSE length(encode(d.path, 'escape'))
+                     - length(replace(encode(d.path, 'escape'), '/', '')) + 1
+           END AS depth
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    WHERE s.tree_id = %(tree)s AND d.path <> %(root)s
-      AND length(encode(d.path, 'escape'))
-          - length(replace(encode(d.path, 'escape'), '/', '')) = %(depth)s - 1
+    WHERE s.tree_id = %(tree)s
 ), before AS (
-    SELECT DISTINCT ON (path) path, rbytes, deleted FROM history
-    WHERE (started, id) <= (%(started)s, %(since)s)
+    SELECT DISTINCT ON (path) path, depth, rbytes, error_stage, deleted
+    FROM history
+    WHERE depth <= %(depth)s AND (started, id) <= (%(started)s, %(since)s)
     ORDER BY path, started DESC, id DESC
 ), after AS (
     SELECT DISTINCT ON (path) path, rbytes, deleted FROM history
+    WHERE depth = %(depth)s
     ORDER BY path, started DESC, id DESC
 )
 SELECT a.path, b.rbytes, a.rbytes
@@ -607,6 +613,16 @@ FROM after a LEFT JOIN before b ON b.path = a.path AND NOT b.deleted
 WHERE NOT a.deleted AND a.rbytes IS NOT NULL
   AND (b.path IS NULL OR b.rbytes IS NOT NULL)
   AND a.rbytes > coalesce(b.rbytes, 0)
+  AND (b.path IS NOT NULL OR NOT EXISTS (
+      SELECT FROM (
+          SELECT p.error_stage FROM before p
+          WHERE NOT p.deleted AND p.depth < %(depth)s
+            AND (p.path = %(root)s
+                 OR substring(a.path FOR length(p.path) + 1) = p.path || '/'::bytea)
+          ORDER BY p.depth DESC LIMIT 1
+      ) nearest
+      WHERE nearest.error_stage IN ('open', 'stat', 'readdir')
+  ))
 ORDER BY a.rbytes - coalesce(b.rbytes, 0) DESC, a.path
 LIMIT %(top)s
 """

@@ -114,8 +114,9 @@ apart reads every stored row of the trees reported.
 
 Growth since the first sample needs 2 samples, since the second-to-last 3;
 both windows end at the latest sample. A directory new in a window grows from 0 and is
-marked (new); one without rstats at either end, or gone by the end, is left
-out. --top 0 skips growth.
+marked (new), unless its nearest ancestor at the start was not listed (an
+error other than rstats), so it may have existed unseen; then it is left out,
+as is one without rstats at either end, or gone by the end. --top 0 skips growth.
 
 {_exit_status(dbcli.DB_UNCHANGED)}"""
 

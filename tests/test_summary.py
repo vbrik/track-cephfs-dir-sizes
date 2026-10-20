@@ -49,18 +49,26 @@ def only_root(base: Capture, tmp_path: Path, name: str, error: ProbeError) -> Pa
     return out
 
 
-def with_rstats_errors(path: Path, *dirs: bytes) -> Path:
-    """Write a copy of capture PATH with an rstats EIO error at each of DIRS.
+def with_errors(path: Path, error: ProbeError, *dirs: bytes) -> Path:
+    """Write a copy of capture PATH in which each of DIRS failed with ERROR.
 
-    Returns the copy's path: PATH's with "eio-" before the name.
+    A directory an error leaves unlisted loses its subtree. Returns the copy's
+    path: PATH's with "err-" before the name.
     """
     capture = load_capture(path)
-    error = ProbeError(Stage.RSTATS, "EIO")
-    gone = dict(rctime=None, rbytes=None, rfiles=None, rsubdirs=None, error=error)
-    probes = {**capture.probes, **{d: replace(capture.probes[d], **gone) for d in dirs}}
-    header = replace(capture.header, errors=capture.header.errors + len(dirs))
-    out = path.with_name(f"eio-{path.name}")
-    write_capture(out, header, probes.values())
+    below = tuple(d + b"/" for d in dirs)
+    unlisted = error.stage != Stage.RSTATS
+    probes = [
+        replace(DirProbe(p.path, error=error), children=p.children)
+        if p.path in dirs
+        else p
+        for p in capture.probes.values()
+        if not (unlisted and p.path.startswith(below))
+    ]
+    errors = sum(1 for p in probes if p.error)
+    header = replace(capture.header, dirs=len(probes), errors=errors)
+    out = path.with_name(f"err-{path.name}")
+    write_capture(out, header, probes)
     return out
 
 
@@ -258,14 +266,37 @@ def test_growth_honors_depth_top_and_ties_by_path(db, dsn, subtree, initial, tmp
 def test_growth_skips_deleted_dirs_and_rows_without_rstats(db, dsn, subtree, tmp_path):
     sample.run_db_init(dsn)
     broken_before, broken_after, grown, removed = at_depth(subtree, 1)[:4]
+    eio = ProbeError(Stage.RSTATS, "EIO")
     first = edit(subtree, tmp_path, "first", 0)
-    replay(dsn, with_rstats_errors(first, broken_before), max_depth=DEPTH)
+    replay(dsn, with_errors(first, eio, broken_before), max_depth=DEPTH)
     touch = [broken_before, broken_after, grown, grown]
     second = edit(subtree, tmp_path, "second", 1, touch=touch, remove=[removed])
-    replay(dsn, with_rstats_errors(second, broken_after), max_depth=DEPTH)
+    replay(dsn, with_errors(second, eio, broken_after), max_depth=DEPTH)
     (growth,) = summarize(db).tree_stats[0].growth
     rbytes = subtree.probes[grown].rbytes
     assert growth.dirs == (DirGrowth(grown, rbytes, rbytes + 2),)
+
+
+def test_growth_counts_new_only_below_a_listed_ancestor(db, dsn, subtree, tmp_path):
+    sample.run_db_init(dsn)
+    with_children = {split(p)[0] for p in at_depth(subtree, 2)}
+    hidden, eio, listed = sorted(with_children)[:3]
+    first = edit(subtree, tmp_path, "first", 0)
+    first = with_errors(first, ProbeError(Stage.OPEN, "EACCES"), hidden)
+    replay(dsn, with_errors(first, ProbeError(Stage.RSTATS, "EIO"), eio), max_depth=2)
+    below_eio, below_listed = eio + b"/0000new", listed + b"/0000new"
+    fresh, kid = b"0000fresh", b"0000fresh/kid"
+    added = [below_eio, below_listed, fresh, kid]
+    touch = [below_eio, *[below_listed] * 2, *[kid] * 3]
+    second = edit(subtree, tmp_path, "second", 1, add=added, touch=touch)
+    replay(dsn, second, max_depth=2)
+    (growth,) = summarize(db, depth=2, top=10).tree_stats[0].growth
+    # hidden's children were unseen at the start, not new
+    assert growth.dirs == (
+        DirGrowth(kid, None, 3),
+        DirGrowth(below_listed, None, 2),
+        DirGrowth(below_eio, None, 1),
+    )
 
 
 T1 = datetime(2026, 10, 16, 20, 48, 11, 500_000, tzinfo=UTC)

@@ -31,6 +31,6 @@
 | unchanged | A probed directory whose row equals its baseline row in every dir state column. Unless it is in the retry set, its children are not listed. |
 | skipped (pruned) subtree | An unchanged directory above max depth and outside the retry set, whose children the walk did not read. |
 | new, modified | A row a sample stored is new if its path had no current row before the sample (never seen, or tombstoned), else modified. `db summary` counts both per sample. |
-| growth | How much a directory's rbytes grew between two samples: its state as of the later one minus its state as of the earlier one (each path's latest row up to that sample); a directory absent at the start grows from 0. `db summary` ranks directories at one depth by it. |
+| growth | How much a directory's rbytes grew between two samples: its state as of the later one minus its state as of the earlier one (each path's latest row up to that sample); a directory absent at the start grows from 0 if its nearest ancestor present then was listed, and is not ranked otherwise. `db summary` ranks directories at one depth by it. |
 | tombstone | A dir state row with `deleted` true and no other values: the path was deleted. Every deleted directory gets one, including each of its baseline descendants. A path created again later gets an ordinary row. |
 | retry set | The paths with an error row in the baseline plus all their ancestors; they are listed even if unchanged, so errors are retried by every sample. |
