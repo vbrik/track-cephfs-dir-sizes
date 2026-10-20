@@ -95,19 +95,19 @@ def _db_message(e: DbError, unchanged: str) -> str:
 
 
 def describe_tree(key: TreeKey) -> str:
-    """Return "tree (cluster FSID, filesystem NAME, path PATH, depth N, max dirs M)"."""
+    """Return "tree (cluster FSID, filesystem NAME, path PATH, depth N)"."""
     return f"tree ({tree_identity(key)})"
 
 
 def tree_identity(key: TreeKey) -> str:
-    """Return "cluster FSID, filesystem NAME, path PATH, depth N, max dirs M".
+    """Return "cluster FSID, filesystem NAME, path PATH, depth N".
 
     "default filesystem" stands in for a None fs_name.
     """
     fs = "default filesystem" if key.fs_name is None else f"filesystem {key.fs_name}"
     return (
         f"cluster {key.cluster_fsid}, {fs}, path {os.fsdecode(key.fs_path)}, "
-        f"depth {key.max_depth}, max dirs {key.max_dirs}"
+        f"depth {key.max_depth}"
     )
 
 

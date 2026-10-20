@@ -276,14 +276,22 @@ def test_replay_dated_before_latest_sample_is_refused_before_walking(
     assert count(db, "sample") == 2
 
 
-def test_depth_or_max_dirs_starts_a_new_tree(db, dsn, subtree, initial):
+def test_depth_starts_a_new_tree(db, dsn, subtree, initial):
     shallow = replay(dsn, SUBTREE, max_depth=2)
-    roomy = replay(dsn, SUBTREE, max_dirs=10**6 + 1)
-    assert (shallow.kind, roomy.kind) == ("initial", "initial")
-    assert count(db, "tree") == 3
-    assert len({initial.tree, shallow.tree, roomy.tree}) == 3
+    assert shallow.kind == "initial"
+    assert count(db, "tree") == 2
+    assert shallow.tree != initial.tree
     assert shallow.changed == shallow.dirs < subtree.header.dirs
-    assert roomy.changed == subtree.header.dirs
+
+
+def test_another_max_dirs_continues_the_tree(db, dsn, subtree, initial, tmp_path):
+    second = edited_capture(
+        subtree, tmp_path / "second.jsonl.gz", started=later(subtree)
+    )
+    tight = replay(dsn, second, max_dirs=subtree.header.dirs)
+    assert tight.kind == "incremental"
+    assert tight.tree == initial.tree
+    assert count(db, "tree") == 1
 
 
 def test_failed_store_leaves_nothing(db, dsn, subtree, initial, tmp_path):

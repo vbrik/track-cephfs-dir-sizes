@@ -55,7 +55,6 @@ HEADER = CaptureHeader(
     errors=0,
     anonymized=False,
 )
-MAX_DIRS = 10**6
 FULL = DirProbe(
     path=b"a/b",
     ino=1,
@@ -85,10 +84,9 @@ def store(
     *,
     baseline: Baseline | None = None,
     replayed_from: str | None = None,
-    max_dirs: int = MAX_DIRS,
 ) -> int:
     """Store PROBES as a sample of HEADER's tree against BASELINE (default: loaded)."""
-    key = tree_key_of(header, max_dirs)
+    key = tree_key_of(header)
     if baseline is None:
         baseline = load_baseline(conn, key)
     sample_diff = diff(baseline, probes, header.max_depth)
@@ -157,17 +155,16 @@ def test_dir_state_columns_end_with_deleted():
 
 def test_tree_key_of_encodes_fs_path():
     header = replace(HEADER, fs_name="cephfs", fs_path="/caf\udce9", max_depth=3)
-    assert tree_key_of(header, 5) == TreeKey(
+    assert tree_key_of(header) == TreeKey(
         cluster_fsid=HEADER.cluster_fsid,
         fs_name="cephfs",
         fs_path=b"/caf\xe9",
         max_depth=3,
-        max_dirs=5,
     )
 
 
 def test_check_order():
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     check_order(Baseline.empty(), key, T0)
     baseline = Baseline.build(1, T0, {})
     for started in (T0, T0 - timedelta(microseconds=1)):
@@ -180,7 +177,7 @@ def test_check_order():
 
 
 def test_store_sample_refuses_a_key_of_another_tree():
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     empty = diff(Baseline.empty(), (), HEADER.max_depth)
     with pytest.raises(ValueError, match="not the tree of the header"):
         store_sample(
@@ -206,7 +203,7 @@ def test_import_without_psycopg():
 def test_init_creates_and_is_idempotent(db):
     assert init_schema(db) is True
     assert init_schema(db) is False
-    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(3,)]
+    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(4,)]
     check_schema(db)
 
 
@@ -256,12 +253,12 @@ def test_store_round_trip(db):
 
 def test_load_baseline_empty_for_unknown_tree_and_for_tree_without_samples(db):
     init_schema(db)
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     assert load_baseline(db, key) == Baseline.empty()
     db.execute(
-        "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth,"
-        " max_dirs) VALUES (%s, %s, %s, %s, %s)",
-        (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth, key.max_dirs),
+        "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
+        " VALUES (%s, %s, %s, %s)",
+        (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
     )
     assert load_baseline(db, key) == Baseline.empty()
 
@@ -285,7 +282,7 @@ def test_load_baseline_returns_latest_state_per_path(db):
     store(db, DEEP, INITIAL)
     second = later(DEEP, 60)
     second_id = store(db, second, SECOND)
-    baseline = load_baseline(db, tree_key_of(DEEP, MAX_DIRS))
+    baseline = load_baseline(db, tree_key_of(DEEP))
     assert baseline.sample_id == second_id
     assert baseline.started == datetime.fromisoformat(second.started)
     assert baseline.rows == {
@@ -353,7 +350,7 @@ def test_samples_of_a_tree_do_not_consume_tree_ids(db):
 
 def test_stale_baseline_is_refused(db):
     init_schema(db)
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     store(db, HEADER, [DirProbe(ROOT, rctime=1)])
     stale = load_baseline(db, key)
     store(db, later(HEADER, 60), [DirProbe(ROOT, rctime=2)])
@@ -379,7 +376,7 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
     the tree row lock, even if the session default is REPEATABLE READ (whose
     snapshot, taken before the wait, would hide that sample)."""
     init_schema(db)
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     first_id = store(db, HEADER, [DirProbe(ROOT, rctime=1)])
     baseline = load_baseline(db, key)
     loser_header = later(HEADER, 120)
@@ -417,7 +414,7 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
 
 def test_initial_sample_racing_an_initial_sample_is_refused(db):
     init_schema(db)
-    key = tree_key_of(HEADER, MAX_DIRS)
+    key = tree_key_of(HEADER)
     assert key.fs_name is None
     store(db, HEADER, [DirProbe(ROOT)], baseline=Baseline.empty())
     with pytest.raises(ConcurrentSample) as exc:
@@ -439,20 +436,19 @@ def test_older_started_is_refused(db, seconds):
     assert counts(db) == after
 
 
-def test_trees_differ_by_depth_and_max_dirs(db):
+def test_trees_differ_by_depth_fs_name_and_fs_path(db):
     init_schema(db)
     trees = [
-        (HEADER, MAX_DIRS),
-        (replace(HEADER, max_depth=2), MAX_DIRS),
-        (HEADER, MAX_DIRS + 1),
-        (replace(HEADER, fs_name="a"), MAX_DIRS),
-        (replace(HEADER, fs_path="/other"), MAX_DIRS),
+        HEADER,
+        replace(HEADER, max_depth=2),
+        replace(HEADER, fs_name="a"),
+        replace(HEADER, fs_path="/other"),
     ]
-    for ino, (header, max_dirs) in enumerate(trees):
-        store(db, header, [DirProbe(ROOT, ino=ino)], max_dirs=max_dirs)
+    for ino, header in enumerate(trees):
+        store(db, header, [DirProbe(ROOT, ino=ino)])
     assert counts(db)["tree"] == len(trees)
-    for ino, (header, max_dirs) in enumerate(trees):
-        baseline = load_baseline(db, tree_key_of(header, max_dirs))
+    for ino, header in enumerate(trees):
+        baseline = load_baseline(db, tree_key_of(header))
         assert baseline.rows == {ROOT: (ino,) + (None,) * (len(ROW_COLUMNS) - 1)}
     # Two NULL fs_names with equal other fields are one tree.
     store(db, later(HEADER, 60), [DirProbe(ROOT, ino=99)])
@@ -468,7 +464,7 @@ def test_awkward_values_round_trip(db):
     ]
     sample_id = store(db, HEADER, probes)
     assert read_sample(db, sample_id) == probes
-    baseline = load_baseline(db, tree_key_of(HEADER, MAX_DIRS))
+    baseline = load_baseline(db, tree_key_of(HEADER))
     assert diff(baseline, probes, HEADER.max_depth).changed == []
 
 

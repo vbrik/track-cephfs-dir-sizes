@@ -42,9 +42,7 @@ from trackdir.walker import DirLimitExceeded, walk
 
 # Probes stay in memory until the end: ~0.6 KB each (measured), so ~0.6 GB. A
 # sample also holds the baseline: ~0.5 GB per million current directories, more
-# while loading. --max-dirs is part of a tree's identity: changing this default
-# in a release splits every existing tree's history (their baselines are
-# orphaned, so each tree needs a full initial sample again).
+# while loading.
 DEFAULT_MAX_DIRS = 10_000_000
 DEFAULT_JOBS = 32  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.

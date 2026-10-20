@@ -83,8 +83,8 @@ it changes nothing. A database at another version is refused: drop schema
 `sample` reads ROOT's directories down to `--max-depth`, as `capture` does, and
 stores them as a sample of ROOT's tree. A tree is a directory of a CephFS
 filesystem: cluster fsid, filesystem name, path inside the filesystem, and the
-`--max-depth` and `--max-dirs` the sample ran with. It is the same whichever
-host or mount point samples it.
+`--max-depth` the sample ran with. It is the same whichever host or mount point
+samples it.
 
 - **Initial sample.** A tree with no current state (no samples, or every
   directory deleted) gets one that stores every directory.
@@ -124,16 +124,15 @@ the current step (loading the baseline, storing, …) or the walk's counts, e.g.
 directories are found but not yet probed. The line is erased before any other
 message. When stderr is not a terminal, nothing is shown.
 
-`--max-depth` and `--max-dirs` are part of the tree's identity. A run with
-another value of either is a different tree: it takes a full initial sample and
-never sees the other tree's baseline. There is no way to deepen a tree, and
-one ROOT sampled at two depths is stored twice, with nothing linking the
-copies; readers of the database must pick a tree. `--max-dirs` is a memory
-guard for a run, but it counts too, so if a large reorganization pushes a run
-over it, the only way on is a higher `--max-dirs`, which starts a new tree with
-a full initial sample and leaves this tree's history behind. `--max-depth` is
-at most 2147483647 and `--max-dirs` at most 9223372036854775807 (the database
-column types).
+`--max-depth` is part of the tree's identity. A run with another depth is a
+different tree: it takes a full initial sample and never sees the other tree's
+baseline. There is no way to deepen a tree, and one ROOT sampled at two depths
+is stored twice, with nothing linking the copies; readers of the database must
+pick a tree. `--max-dirs` is not part of it: it is a memory guard for one run,
+and a run over it stores nothing, so if a large reorganization pushes a run
+over it, run again with a higher `--max-dirs` and the tree's history goes on.
+`--max-depth` is at most 2147483647 and `--max-dirs` at most
+9223372036854775807 (the database column types).
 
 Run `sample` as root for a complete sample. As another user it is partial:
 directories you cannot read are stored as errors (EACCES) without rstats. Their
@@ -183,7 +182,7 @@ samples' time span, its current directories and errors, ROOT's rbytes, rfiles
 and rsubdirs with their change since the tree's first sample, and a table of
 the newest samples (placeholders):
 
-    Tree 1 (cluster 1111…, default filesystem, path /proj/sub, depth 4, max dirs 1000000)
+    Tree 1 (cluster 1111…, default filesystem, path /proj/sub, depth 4)
       samples: 2, 2026-10-16T20:48:11Z to 2026-10-16T20:48:30Z
       current: 72017 directories; 41 had errors: open EACCES 41
       ROOT:    1.2 PiB, 412345678 files, 5123456 directories, last changed in sample 2

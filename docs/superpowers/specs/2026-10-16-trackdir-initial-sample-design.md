@@ -5,8 +5,9 @@ the implementation plan.
 
 Amended 2026-10-16 by the
 [incremental-sample design](2026-10-16-trackdir-incremental-sample-design.md):
-a tree's identity now also includes `max_depth` and `max_dirs` (another value
-is another tree with its own initial sample); the current-state view is
+a tree's identity now also includes `max_depth` (another value is another tree
+with its own initial sample; `max_dirs` was in it too until schema version 4,
+2026-10-20); the current-state view is
 revisited (it hides tombstoned paths, and "latest" means the greatest
 `(started, id)`); `SamplesExist` and the refusal of a second sample are replaced
 by incremental samples and by order and stale-baseline guards; the schema is

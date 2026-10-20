@@ -19,7 +19,7 @@
 | capture | A file with one probe result per directory of the tracked space, for offline use. |
 | replay | Serving a capture to the walker instead of a live filesystem. |
 | anonymized capture | A capture whose names, uids, gids, cluster fsid, fs name and fs path are replaced by HMAC tokens. |
-| tree | A directory of a CephFS filesystem sampled to a given depth, identified by (cluster fsid, fs name, fs path, `max_depth`, `max_dirs`); the same on every host and mount point. Samples belong to a tree. The same ROOT with another `max_depth` or `max_dirs` is another tree. |
+| tree | A directory of a CephFS filesystem sampled to a given depth, identified by (cluster fsid, fs name, fs path, `max_depth`); the same on every host and mount point. Samples belong to a tree. The same ROOT with another `max_depth` is another tree; another `max_dirs` is the same tree. |
 | filesystem path (`fs_path`) | ROOT's absolute path inside its CephFS filesystem; `/` is the filesystem's root. Unlike ROOT, it does not depend on where the filesystem is mounted. |
 | fs name (`fs_name`) | The CephFS filesystem's name, as the mount names it; NULL (None) means the cluster's default filesystem. |
 | sample | One run of `trackdir sample`, stored in PostgreSQL: the directories of a tree whose state changed since the baseline (the first sample of a tree: all of them), and its deletions. |

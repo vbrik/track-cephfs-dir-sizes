@@ -80,9 +80,10 @@ later samples retry them.
 
 A tree is a directory of a CephFS filesystem, identified by the cluster fsid,
 the filesystem and the directory's path inside it, so it is the same tree
-whichever host or mount point samples it. --max-depth and --max-dirs are part
-of a tree's identity too: a run with another value of either is a different
-tree, and its first sample stores every directory again.
+whichever host or mount point samples it. --max-depth is part of a tree's
+identity too: a run with another depth is a different tree, and its first
+sample stores every directory again. --max-dirs is not: a run over it stores
+nothing, and a higher limit continues the same tree.
 
 DSN is a libpq connection string or URI, e.g.
 postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass

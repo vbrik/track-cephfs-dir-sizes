@@ -62,11 +62,11 @@ def test_replay_walk_with_a_should_list_reads_only_what_it_accepts(subtree):
     assert header.errors == error_counts(probes).total()
 
 
-def test_dir_limit_message_names_the_tree_consequence(subtree):
+def test_dir_limit_message_says_the_tree_stays_the_same(subtree):
     with pytest.raises(FatalError) as exc:
         replay_walk(subtree, 2, max_dirs=1)
     message = collapse(str(exc.value))
-    assert "starts a new tree" in message and "leaves this tree's history" in message
+    assert "Raise --max-dirs" in message and "the tree stays the same" in message
 
 
 def test_replay_walk_at_smaller_depth(subtree):
@@ -174,7 +174,7 @@ def result(**changes):
     fields = {
         "sample_id": 7,
         "root": "/mnt/cephfs/x",
-        "tree": TreeKey("fsid", None, b"/x", 2, 1000),
+        "tree": TreeKey("fsid", None, b"/x", 2),
         "max_depth": 2,
         "dirs": 5,
         "changed": 5,
@@ -192,11 +192,11 @@ def result(**changes):
 def test_render_sample_summary():
     assert collapse(render_sample_summary(result())) == (
         "Stored sample 7 (initial): 5 directories under /mnt/cephfs/x to depth 2, "
-        "tree (cluster fsid, default filesystem, path /x, depth 2, max dirs 1000); "
+        "tree (cluster fsid, default filesystem, path /x, depth 2); "
         "2 had errors: open EACCES 2. Walk 1.2 s, store 0.5 s."
     )
     incremental = result(
-        tree=TreeKey("fsid", "cephfs", b"/x", 4, 1000),
+        tree=TreeKey("fsid", "cephfs", b"/x", 4),
         max_depth=4,
         dirs=1204,
         changed=18,
@@ -211,16 +211,15 @@ def test_render_sample_summary():
     assert collapse(render_sample_summary(incremental)) == (
         "Stored sample 7 (incremental): probed 1204 directories under "
         "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
-        "depth 4, max dirs 1000); 18 changed, 2 deleted, 31 unchanged subtrees "
+        "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees "
         "skipped; none had errors. Walk 3.2 s, store 0.1 s. Replayed from /c.gz."
     )
 
 
-def test_describe_tree_includes_depth_and_max_dirs():
-    key = TreeKey("fsid", None, b"/caf\xe9", 3, 500)
+def test_describe_tree_includes_depth():
+    key = TreeKey("fsid", None, b"/caf\xe9", 3)
     assert describe_tree(key) == (
-        "tree (cluster fsid, default filesystem, path /caf\udce9, depth 3, "
-        "max dirs 500)"
+        "tree (cluster fsid, default filesystem, path /caf\udce9, depth 3)"
     )
 
 
@@ -251,7 +250,7 @@ LATEST = datetime.fromisoformat("2026-10-16T00:00:00+00:00")
 def test_conflicts_name_the_tree_as_the_summary_does(
     subtree, monkeypatch, fs_name, conflict, text
 ):
-    key = replace(tree_key_of(subtree.header, 10**6), fs_name=fs_name)
+    key = replace(tree_key_of(subtree.header), fs_name=fs_name)
     monkeypatch.setattr(dbcli, "connect", fail_to_connect(conflict(key)))
     with pytest.raises(FatalError) as exc:
         run_sample(SampleOptions(dsn="x", replay=SUBTREE), print)
@@ -333,7 +332,7 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
     assert res.kind == "initial"
     assert res.dirs == subtree.header.dirs
     assert (res.changed, res.deleted, res.skipped) == (res.dirs, 0, 0)
-    assert res.tree == tree_key_of(subtree.header, 10**5)
+    assert res.tree == tree_key_of(subtree.header)
     assert res.errors.total() == subtree.header.errors
     assert res.max_depth == subtree.header.max_depth
     assert res.replayed_from == str(SUBTREE.resolve())
@@ -341,11 +340,11 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
     count = db.execute("SELECT count(*) FROM trackdir.dir_state").fetchone()[0]
     assert count == res.dirs
     row = db.execute(
-        "SELECT s.replayed_from, t.max_depth, t.max_dirs FROM trackdir.sample s"
+        "SELECT s.replayed_from, t.max_depth FROM trackdir.sample s"
         " JOIN trackdir.tree t ON t.id = s.tree_id WHERE s.id = %s",
         (res.sample_id,),
     ).fetchone()
-    assert row == (res.replayed_from, subtree.header.max_depth, 10**5)
+    assert row == (res.replayed_from, subtree.header.max_depth)
 
 
 def test_older_replay_is_refused_before_walking(db, dsn, monkeypatch):

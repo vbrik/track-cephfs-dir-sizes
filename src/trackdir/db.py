@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import psycopg
 
 SCHEMA = "trackdir"  # the DDL and queries fix this name; it is not a setting
-SCHEMA_VERSION = 3  # of DDL; no migrations exist, a mismatch is fatal
+SCHEMA_VERSION = 4  # of DDL; no migrations exist, a mismatch is fatal
 
 # The initial-sample spec's section 5 as amended by section 4 of the
 # incremental-sample spec. dir_state holds the rows a sample stored because they
@@ -47,8 +47,7 @@ CREATE TABLE trackdir.tree (
     fs_name      text,            -- NULL: the cluster's default filesystem
     fs_path      bytea NOT NULL,  -- ROOT inside the filesystem; b'/' is its root
     max_depth    integer NOT NULL CHECK (max_depth >= 0),
-    max_dirs     bigint  NOT NULL CHECK (max_dirs > 0),
-    UNIQUE NULLS NOT DISTINCT (cluster_fsid, fs_name, fs_path, max_depth, max_dirs)
+    UNIQUE NULLS NOT DISTINCT (cluster_fsid, fs_name, fs_path, max_depth)
 );
 
 CREATE TABLE trackdir.sample (
@@ -110,7 +109,7 @@ DIR_STATE_COLUMNS = ("sample_id", "path", *ROW_COLUMNS, "deleted")
 # filesystem, which "=" would never match.
 _TREE_MATCH = (
     "cluster_fsid = %s AND fs_name IS NOT DISTINCT FROM %s AND fs_path = %s"
-    " AND max_depth = %s AND max_dirs = %s"
+    " AND max_depth = %s"
 )
 
 # The latest sample of tree %s: the greatest (started, id), as in the view.
@@ -151,17 +150,17 @@ class SchemaVersionMismatch(DbError):
 @dataclass(frozen=True, slots=True)
 class TreeKey:
     """Identifies a tree: a directory of a CephFS filesystem, on any host or mount,
-    sampled to one depth with one directory limit.
+    sampled to one depth.
 
-    A run with another max_depth or max_dirs belongs to another tree, which has
-    its own samples and baseline.
+    A run with another max_depth belongs to another tree, which has its own
+    samples and baseline. max_dirs is not part of the key: a run over it stores
+    nothing, so it never shapes what a tree holds.
     """
 
     cluster_fsid: str
     fs_name: str | None  # None: the cluster's default filesystem
     fs_path: bytes  # the directory's absolute path in the filesystem
     max_depth: int
-    max_dirs: int
 
     @classmethod
     def of(
@@ -170,10 +169,9 @@ class TreeKey:
         fs_name: str | None,
         fs_path: str,
         max_depth: int,
-        max_dirs: int,
     ) -> Self:
         """Return the key for a tree given as header strings; fs_path is fsencoded."""
-        return cls(cluster_fsid, fs_name, os.fsencode(fs_path), max_depth, max_dirs)
+        return cls(cluster_fsid, fs_name, os.fsencode(fs_path), max_depth)
 
 
 class SampleConflict(DbError):
@@ -268,10 +266,10 @@ class DbStats:
     tree_stats: tuple[TreeStats, ...]  # by id
 
 
-def tree_key_of(header: CaptureHeader, max_dirs: int) -> TreeKey:
-    """Return the key of the tree HEADER describes, walked with MAX_DIRS."""
+def tree_key_of(header: CaptureHeader) -> TreeKey:
+    """Return the key of the tree HEADER describes."""
     return TreeKey.of(
-        header.cluster_fsid, header.fs_name, header.fs_path, header.max_depth, max_dirs
+        header.cluster_fsid, header.fs_name, header.fs_path, header.max_depth
     )
 
 
@@ -412,8 +410,8 @@ def store_sample(
     The sample row comes from HEADER (dirs and errors count the probed
     directories; its max_depth is the tree's, so not stored again); its
     dir_state rows, loaded with COPY, are DIFF's changed probes and a
-    tombstone per deleted path. KEY must be HEADER's tree (with the run's
-    max_dirs), else ValueError. BASELINE is what DIFF was computed against.
+    tombstone per deleted path. KEY must be HEADER's tree, else
+    ValueError. BASELINE is what DIFF was computed against.
     REPLAYED_FROM is the capture's absolute path, None for a live sample.
 
     Raises ConcurrentSample if the tree's latest sample is no longer
@@ -423,7 +421,7 @@ def store_sample(
     which the transaction sets whatever the session default: under REPEATABLE
     READ the snapshot, taken before the wait, would hide the first sample.
     """
-    if key != tree_key_of(header, key.max_dirs):
+    if key != tree_key_of(header):
         raise ValueError(f"tree {key} is not the tree of the header")
     started = datetime.fromisoformat(header.started)
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
@@ -510,7 +508,7 @@ _COUNTS = """SELECT (SELECT count(*) FROM trackdir.tree),
 """
 _IN_TREE = "(%(tree)s::bigint IS NULL OR {column} = %(tree)s::bigint)"
 _TREES = (
-    "SELECT id, cluster_fsid, fs_name, fs_path, max_depth, max_dirs"
+    "SELECT id, cluster_fsid, fs_name, fs_path, max_depth"
     f" FROM trackdir.tree WHERE {_IN_TREE.format(column='id')} ORDER BY id"
 )
 # Each tree's samples, oldest first, with what they stored. A row is new unless
@@ -607,14 +605,14 @@ def _lock_tree(cur: "psycopg.Cursor", key: TreeKey) -> int:
     row = cur.execute(select, params).fetchone()
     if row is None:
         cur.execute(
-            "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth,"
-            " max_dirs) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
+            " VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
             params,
         )
         row = cur.execute(select, params).fetchone()
     return row[0]
 
 
-def _key_params(key: TreeKey) -> tuple[str, str | None, bytes, int, int]:
+def _key_params(key: TreeKey) -> tuple[str, str | None, bytes, int]:
     """Return KEY's fields in _TREE_MATCH order."""
-    return key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth, key.max_dirs
+    return key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth

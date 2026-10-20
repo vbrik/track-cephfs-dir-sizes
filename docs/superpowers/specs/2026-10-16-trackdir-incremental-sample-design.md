@@ -4,6 +4,13 @@ Date: 2026-10-16. Status: draft; the decisions in section 2 were agreed in
 brainstorming on 2026-10-16 (the user accepted all proposed defaults), the
 document itself awaits approval.
 
+Amended 2026-10-20: `max_dirs` is no longer part of a tree's identity, and the
+schema is version 4 (`tree.max_dirs` dropped, no migration). A run over
+`--max-dirs` stores nothing, so the limit never shapes what a tree holds; in
+the key it only split a tree's history whenever the limit (or its default)
+was raised. See the "`max_dirs` in the identity" item of section 10. Where
+this spec still lists `max_dirs` as a key field, that is superseded.
+
 ## 1. Goal and scope
 
 `trackdir sample` stores a tree's first sample (initial-sample spec). This
@@ -391,7 +398,9 @@ Verdict:
 - **A mistyped ROOT** that resolves to a CephFS directory with a new
   `fs_path` starts a new tree with a full initial sample; the summary says
   `(initial)`.
-- **`max_dirs` in the identity is a trap.** It is a memory guard, not a
+- **`max_dirs` in the identity is a trap.** (Resolved 2026-10-20: the key is
+  now `max_depth` only, as recommended below; raising the default to
+  10,000,000 would otherwise have split every existing tree.) It is a memory guard, not a
   property of the tracked space, and an incremental walk probes far fewer
   directories than the tree holds. If a sample ever exceeds the limit (a
   large reorganization) the user must raise `--max-dirs`, which starts a new
@@ -402,6 +411,6 @@ Verdict:
   the key keeps `max_dirs`, and the limit error now says plainly that raising
   `--max-dirs` or changing `--max-depth` starts a new tree and leaves this
   tree's history behind. Revisit if it bites.
-- **One ROOT, several trees.** Different `max_depth` or `max_dirs` store the
+- **One ROOT, several trees.** Different `max_depth` store the
   same directories again under another tree; nothing links them. Readers of
   the database must pick one tree.

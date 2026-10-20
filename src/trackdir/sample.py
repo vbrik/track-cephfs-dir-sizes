@@ -50,12 +50,12 @@ from trackdir.messages import FatalError, describe_errors, paragraph
 from trackdir.model import DirProbe, ShouldList, error_counts
 from trackdir.progress import NO_PROGRESS, Progress
 
-# Ends the message of a walk over --max-dirs. The limit is part of the tree's
-# identity, so the only way past it forfeits the incremental baseline.
+# Ends the message of a walk over --max-dirs. Unlike capture's advice it does not
+# suggest a lower --max-depth: the depth is part of the tree's identity, so that
+# would start a new tree and leave this tree's history behind.
 SAMPLE_LIMIT_ADVICE = (
-    "Raising --max-dirs, or changing --max-depth, starts a new tree: a full "
-    "initial sample that leaves this tree's history behind. Do that only if "
-    "memory allows and you accept it."
+    "Raise --max-dirs if memory allows; the tree stays the same. Another "
+    "--max-depth would start a new tree with a full initial sample."
 )
 
 
@@ -242,7 +242,6 @@ def _walk_live(
             live.fs_name,
             live.fs_path,
             opts.max_depth,
-            opts.max_dirs,
         )
         # The real start is later than now, so this order check never refuses
         # falsely; it fails before the walk if the tree's latest sample is
@@ -268,7 +267,7 @@ def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
     capture = _load(opts.replay)
     max_depth = capture.header.max_depth if opts.max_depth is None else opts.max_depth
     _replay_backend(capture, max_depth)  # fails on the depth before the pre-check
-    key = tree_key_of(replace(capture.header, max_depth=max_depth), opts.max_dirs)
+    key = tree_key_of(replace(capture.header, max_depth=max_depth))
     started = datetime.fromisoformat(capture.header.started)
     progress.phase("loading the baseline")
     baseline = _precheck(opts.dsn, key, started)
