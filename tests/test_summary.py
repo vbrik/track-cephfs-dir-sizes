@@ -29,7 +29,7 @@ from trackdir.db import (
     summarize,
 )
 from trackdir.dbcli import display_path, tree_identity
-from trackdir.model import ROOT, DirProbe, ProbeError, Stage, split
+from trackdir.model import ROOT, DirProbe, ProbeError, Stage, fs_absolute, split
 from trackdir.summary import format_bytes, render_json, render_text
 
 DEPTH = 2  # of most replays; SUBTREE has 380 directories down to it
@@ -381,8 +381,8 @@ def test_render_text():
         "        2      41  1000  live\n"
         "  1 older sample not shown\n"
         "  grew most at depth 1 since sample 5:\n"
-        "    +512.0 GiB  alpha\n"
-        "      +3.0 GiB  beta (new)\n"
+        "    +512.0 GiB  /proj/sub/alpha\n"
+        "      +3.0 GiB  /proj/sub/beta (new)\n"
         "  grew most at depth 1 since sample 6: none\n"
     )
 
@@ -432,7 +432,7 @@ def test_render_text_escapes_undecodable_paths():
     text = render_text(stats)
     text.encode()
     assert "path /caf\\xe9, depth 4)\n" in text
-    assert "    +1 B  caf\\xe9\n" in text
+    assert "    +1 B  /caf\\xe9/caf\\xe9\n" in text
 
 
 @pytest.mark.parametrize(
@@ -526,8 +526,9 @@ def test_cli_top_and_depth_select_growth(initial, dsn, subtree, tmp_path, capsys
     assert main(["db", "summary", "--db", dsn, "--depth", "2", "--top", "4"]) == 0
     stdout = capsys.readouterr().out
     assert "  grew most at depth 2 since sample 1:\n" in stdout
+    fs_path = os.fsencode(subtree.header.fs_path)
     for path in touched:
-        assert f"    +1 B  {os.fsdecode(path)}\n" in stdout
+        assert f"    +1 B  {os.fsdecode(fs_absolute(fs_path, path))}\n" in stdout
     assert main(["db", "summary", "--db", dsn, "--top", "0"]) == 0
     assert "grew most" not in capsys.readouterr().out
 

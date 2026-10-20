@@ -12,11 +12,13 @@ from trackdir.db import (
     Growth,
     RootTotals,
     SampleStats,
+    TreeKey,
     TreeStats,
     summarize,
 )
 from trackdir.dbcli import DB_UNCHANGED, database, display_path, tree_identity, utc
 from trackdir.messages import FatalError, describe_errors
+from trackdir.model import fs_absolute
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
 _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
@@ -106,16 +108,19 @@ def _tree_lines(tree: TreeStats) -> list[str]:
         noun = "older sample" if tree.recent else "sample"
         lines.append(f"  {_count(hidden, noun)} not shown")
     for growth in tree.growth:
-        lines += _growth_lines(growth, tree.key.max_depth)
+        lines += _growth_lines(growth, tree.key)
     return lines
 
 
-def _growth_lines(growth: Growth, max_depth: int) -> list[str]:
-    """Return a heading and a line per directory, or one line if none grew."""
+def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
+    """Return a heading and a line per directory, or one line if none grew.
+
+    Directories show as absolute paths in tree KEY's filesystem.
+    """
     heading = f"  grew most at depth {growth.depth} since sample {growth.since}:"
     if not growth.dirs:
-        if growth.depth > max_depth:
-            return [f"{heading} none; the tree is sampled to depth {max_depth}"]
+        if growth.depth > key.max_depth:
+            return [f"{heading} none; the tree is sampled to depth {key.max_depth}"]
         return [f"{heading} none"]
     sizes = [
         _signed_bytes(d.rbytes_after - (d.rbytes_before or 0)) for d in growth.dirs
@@ -124,7 +129,7 @@ def _growth_lines(growth: Growth, max_depth: int) -> list[str]:
     return [
         heading,
         *(
-            f"    {size:>{width}}  {display_path(d.path)}"
+            f"    {size:>{width}}  {display_path(fs_absolute(key.fs_path, d.path))}"
             + (" (new)" if d.rbytes_before is None else "")
             for size, d in zip(sizes, growth.dirs, strict=True)
         ),

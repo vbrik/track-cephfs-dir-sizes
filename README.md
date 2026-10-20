@@ -198,8 +198,8 @@ rbytes grew the most since the tree's first sample and since its second-to-last
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
            1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
       grew most at depth 1 since sample 1:
-        +12.0 GiB  proj-a
-         +8.5 GiB  proj-b
+        +12.0 GiB  /proj/sub/proj-a
+         +8.5 GiB  /proj/sub/proj-b
 
 A stored directory is new if it had no current row before the sample, else
 modified; deleted counts tombstones. ROOT's rstats cover its whole subtree,
@@ -210,8 +210,10 @@ both windows end at the latest sample. A directory new in a window grows from 0 
 marked `(new)`, unless its nearest ancestor at the start was not listed (an
 error other than rstats), so it may have existed unseen; then it is left out,
 as is one without rstats at either end, or deleted by the end. `--top 0` skips growth.
+Growth shows each directory's absolute path in the filesystem (the tree's
+path joined with the directory's path below ROOT).
 `--json` gives the same data as one JSON document, with paths fsdecoded as in
-captures and times in ISO 8601 UTC.
+captures, growth paths relative to ROOT as stored, and times in ISO 8601 UTC.
 
 ## Development
 

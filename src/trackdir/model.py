@@ -120,6 +120,13 @@ def join(parent: bytes, name: bytes) -> bytes:
     return name if parent == ROOT else parent + b"/" + name
 
 
+def fs_absolute(fs_path: bytes, path: bytes) -> bytes:
+    """Return PATH's absolute path in the filesystem, given ROOT's FS_PATH there."""
+    if path == ROOT:
+        return fs_path
+    return fs_path.rstrip(b"/") + b"/" + path
+
+
 def split(path: bytes) -> tuple[bytes, bytes]:
     """Return (parent path, name) of PATH, which must not be ROOT."""
     parent, sep, name = path.rpartition(b"/")

@@ -10,6 +10,7 @@ from trackdir.model import (
     check_path,
     errno_name,
     error_counts,
+    fs_absolute,
     join,
     list_above,
     path_depth,
@@ -30,6 +31,19 @@ def test_join_and_split_are_inverse():
     assert join(b"a", b"b") == b"a/b"
     assert split(b"a") == (ROOT, b"a")
     assert split(b"a/b/c") == (b"a/b", b"c")
+
+
+@pytest.mark.parametrize(
+    ("fs_path", "path", "absolute"),
+    [
+        (b"/proj/sub", b"a/b", b"/proj/sub/a/b"),
+        (b"/proj/sub", ROOT, b"/proj/sub"),
+        (b"/", b"a", b"/a"),
+        (b"/", ROOT, b"/"),
+    ],
+)
+def test_fs_absolute_prefixes_roots_filesystem_path(fs_path, path, absolute):
+    assert fs_absolute(fs_path, path) == absolute
 
 
 def test_tree_key_puts_root_first_and_subtrees_right_after_parents():
