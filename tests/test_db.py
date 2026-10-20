@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import time
@@ -151,6 +152,17 @@ def test_dir_state_columns_end_with_deleted():
     assert DIR_STATE_COLUMNS[:2] == ("sample_id", "path")
     assert DIR_STATE_COLUMNS[2:-1] == ROW_COLUMNS
     assert DIR_STATE_COLUMNS[-1] == "deleted"
+
+
+def test_schema_doc_covers_the_ddl():
+    doc = (SRC.parent / "docs" / "schema.md").read_text()
+    objects = re.findall(r"CREATE (?:TABLE|VIEW) trackdir\.(\w+)", db_module.DDL)
+    tables = re.findall(r"^CREATE TABLE .*? \((.*?)^\);", db_module.DDL, re.M | re.S)
+    columns = re.findall(r"^    (\w+) ", "".join(tables), re.MULTILINE)
+    columns = [c for c in columns if c not in ("PRIMARY", "UNIQUE", "CHECK")]
+    assert "dir_state" in objects and "rsubdirs" in columns
+    assert [n for n in objects + columns if f"`{n}`" not in doc] == []
+    assert f"(currently {db_module.SCHEMA_VERSION})" in doc
 
 
 def test_tree_key_of_encodes_fs_path():

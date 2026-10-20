@@ -76,9 +76,10 @@ with `zcat FILE | jq`.
     trackdir sample /mnt/cephfs/projects --max-depth 3   # run it again and again
     trackdir sample --replay projects.jsonl.gz           # from a capture
 
-`db init` creates the tables in schema `trackdir` (schema version 3); repeating
-it changes nothing. A database at another version is refused: drop schema
-`trackdir` and run `db init` again (there is no migration).
+`db init` creates the tables in schema `trackdir`
+([docs/schema.md](docs/schema.md)); repeating it changes nothing. A database at
+another schema version is refused: drop schema `trackdir` and run `db init`
+again (there is no migration).
 
 `sample` reads ROOT's directories down to `--max-depth`, as `capture` does, and
 stores them as a sample of ROOT's tree. A tree is a directory of a CephFS
@@ -240,6 +241,7 @@ The script touches only the container `trackdir-postgres` and the volume
 
 - [docs/terms.md](docs/terms.md): terms used in code and docs.
 - [docs/conventions.md](docs/conventions.md): project conventions.
+- [docs/schema.md](docs/schema.md): the database schema, for tools that read it.
 - [Design of capture](docs/superpowers/specs/2026-10-15-trackdir-capture-design.md).
 - [Design of the initial sample](docs/superpowers/specs/2026-10-16-trackdir-initial-sample-design.md).
 - [Design of incremental samples](docs/superpowers/specs/2026-10-16-trackdir-incremental-sample-design.md).
