@@ -45,7 +45,7 @@ from trackdir.walker import DirLimitExceeded, walk
 # while loading. --max-dirs is part of a tree's identity: changing this default
 # in a release splits every existing tree's history (their baselines are
 # orphaned, so each tree needs a full initial sample again).
-DEFAULT_MAX_DIRS = 1_000_000
+DEFAULT_MAX_DIRS = 10_000_000
 DEFAULT_JOBS = 32  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.
 DEFAULT_LIMIT_ADVICE = "Raise --max-dirs if memory allows, or lower --max-depth."
