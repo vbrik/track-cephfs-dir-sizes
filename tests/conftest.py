@@ -79,6 +79,11 @@ def fake_ceph(monkeypatch):
     monkeypatch.setattr(live, "identify", lambda fd, root: CephMount(None, None, "/x"))
 
 
+# Key of the advisory lock that makes concurrent test runs take turns at the
+# shared test database; any constant works if every run uses the same one.
+_DB_LOCK = 0x74726B64  # "trkd"
+
+
 def _drop_schema(dsn: str) -> None:
     from trackdir.db import connect
 
@@ -90,8 +95,10 @@ def _drop_schema(dsn: str) -> None:
 def db():
     """A connection to TRACKDIR_TEST_DSN; schema trackdir is dropped before and after.
 
-    Skips without TRACKDIR_TEST_DSN or psycopg. Fails unless the database name
-    ends in _test, so a mistyped DSN cannot drop development data.
+    Holds a session advisory lock throughout, so a concurrent test run waits
+    instead of dropping the schema or storing samples under this test. Skips
+    without TRACKDIR_TEST_DSN or psycopg. Fails unless the database name ends
+    in _test, so a mistyped DSN cannot drop development data.
     """
     dsn = os.environ.get("TRACKDIR_TEST_DSN")
     if not dsn:
@@ -107,10 +114,12 @@ def db():
             f"TRACKDIR_TEST_DSN names database {dbname!r}; the database tests drop"
             " schema trackdir, so they run only on a database named *_test"
         )
-    _drop_schema(dsn)
-    with connect(dsn) as conn:
-        yield conn
-    _drop_schema(dsn)
+    with connect(dsn) as lock:
+        lock.execute("SELECT pg_advisory_lock(%s)", (_DB_LOCK,))
+        _drop_schema(dsn)
+        with connect(dsn) as conn:
+            yield conn
+        _drop_schema(dsn)
 
 
 @pytest.fixture
