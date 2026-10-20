@@ -239,6 +239,28 @@ class SampleStats:
 
 
 @dataclass(frozen=True, slots=True)
+class DirGrowth:
+    """A directory's rbytes at the start and the end of a growth window."""
+
+    path: bytes
+    rbytes_before: int | None  # None: the directory is new in the window
+    rbytes_after: int
+
+
+@dataclass(frozen=True, slots=True)
+class Growth:
+    """The directories at one depth whose rbytes grew the most since a sample.
+
+    The window runs from sample SINCE to the tree's latest sample. Directories
+    without rstats at either end, and those gone by the end, are left out.
+    """
+
+    since: int
+    depth: int
+    dirs: tuple[DirGrowth, ...]  # most growth first, ties by path
+
+
+@dataclass(frozen=True, slots=True)
 class TreeStats:
     """One tree: its samples and its current state."""
 
@@ -252,6 +274,7 @@ class TreeStats:
     root_now: RootTotals | None  # None if ROOT's current row has no rstats
     root_first: RootTotals | None  # earliest ROOT row with rstats
     recent: tuple[SampleStats, ...]  # newest first
+    growth: tuple[Growth, ...]  # since the first sample, then the second-to-last
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,15 +489,22 @@ def store_sample(
 
 
 def summarize(
-    conn: "psycopg.Connection", tree_id: int | None = None, recent: int = 10
+    conn: "psycopg.Connection",
+    tree_id: int | None = None,
+    recent: int = 10,
+    top: int = 3,
+    depth: int = 1,
 ) -> DbStats:
     """Return the database's statistics, with those of tree TREE_ID or all trees.
 
     An unknown TREE_ID gives no tree statistics. Each tree lists its RECENT
-    newest samples. Telling new rows from modified ones, and so a sample's kind,
-    sorts every dir_state row of the trees; one READ ONLY REPEATABLE READ
-    transaction keeps all numbers consistent. Raises SchemaMissing or
-    SchemaVersionMismatch unless the schema is current.
+    newest samples, and the TOP directories at DEPTH (>= 1) that grew the most
+    since its first sample, given 2 samples, and since its second-to-last, given
+    3; TOP 0 skips growth. Telling new rows from modified ones, and so a
+    sample's kind, sorts every dir_state row of the trees; so does each growth
+    window, for the rows at DEPTH. One READ ONLY REPEATABLE READ transaction
+    keeps all numbers consistent. Raises SchemaMissing or SchemaVersionMismatch
+    unless the schema is current.
     """
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -485,6 +515,10 @@ def summarize(
         samples = _group(cur.execute(_SAMPLES, params))
         roots = _group(cur.execute(_ROOT_ROWS, {**params, "root": ROOT}))
         errors = _group(cur.execute(_CURRENT_ERRORS, params))
+        growth = {
+            tree_id: _growth(cur, tree_id, samples.get(tree_id, []), top, depth)
+            for tree_id, *_ in trees
+        }
     tree_stats = tuple(
         _tree_stats(
             tree_id,
@@ -493,6 +527,7 @@ def summarize(
             roots.get(tree_id, []),
             errors.get(tree_id, []),
             recent,
+            growth[tree_id],
         )
         for tree_id, *key in trees
     )
@@ -547,6 +582,62 @@ WHERE error_stage IS NOT NULL AND {_IN_TREE.format(column="tree_id")}
 GROUP BY tree_id, error_stage, error_code
 """
 
+# The %(top)s directories at depth %(depth)s of tree %(tree)s whose rbytes grew
+# the most from sample %(since)s, started at %(started)s, to the latest sample;
+# most first, ties by path. A path's state at a sample is its latest row up to
+# it, in the view's order. A path absent or tombstoned at the start is new and
+# grows from 0. Depth counts the "/" of the escaped path: escaping writes only
+# "\" and bytes outside printable ASCII differently.
+_GROWTH = """WITH history AS (
+    SELECT d.path, d.rbytes, d.deleted, s.started, s.id
+    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
+    WHERE s.tree_id = %(tree)s AND d.path <> %(root)s
+      AND length(encode(d.path, 'escape'))
+          - length(replace(encode(d.path, 'escape'), '/', '')) = %(depth)s - 1
+), before AS (
+    SELECT DISTINCT ON (path) path, rbytes, deleted FROM history
+    WHERE (started, id) <= (%(started)s, %(since)s)
+    ORDER BY path, started DESC, id DESC
+), after AS (
+    SELECT DISTINCT ON (path) path, rbytes, deleted FROM history
+    ORDER BY path, started DESC, id DESC
+)
+SELECT a.path, b.rbytes, a.rbytes
+FROM after a LEFT JOIN before b ON b.path = a.path AND NOT b.deleted
+WHERE NOT a.deleted AND a.rbytes IS NOT NULL
+  AND (b.path IS NULL OR b.rbytes IS NOT NULL)
+  AND a.rbytes > coalesce(b.rbytes, 0)
+ORDER BY a.rbytes - coalesce(b.rbytes, 0) DESC, a.path
+LIMIT %(top)s
+"""
+
+
+def _growth(
+    cur: "psycopg.Cursor", tree_id: int, samples: list[tuple], top: int, depth: int
+) -> tuple[Growth, ...]:
+    """Return tree TREE_ID's growth windows; see summarize.
+
+    SAMPLES are the tree's _SAMPLES rows, oldest first, without tree_id.
+    """
+    if not top:
+        return ()
+    starts = [samples[0]] if len(samples) >= 2 else []
+    if len(samples) >= 3:
+        starts.append(samples[-2])
+    windows = []
+    for since, started, *_ in starts:
+        params = {
+            "tree": tree_id,
+            "root": ROOT,
+            "depth": depth,
+            "since": since,
+            "started": started,
+            "top": top,
+        }
+        dirs = tuple(DirGrowth(*row) for row in cur.execute(_GROWTH, params))
+        windows.append(Growth(since, depth, dirs))
+    return tuple(windows)
+
 
 def _group(rows: Iterator[tuple]) -> dict[int, list[tuple]]:
     """Return ROWS by their first column, without it, in order."""
@@ -563,6 +654,7 @@ def _tree_stats(
     roots: list[tuple],
     errors: list[tuple],
     recent: int,
+    growth: tuple[Growth, ...],
 ) -> TreeStats:
     """Return the statistics of a tree from the rows of summarize's queries.
 
@@ -590,6 +682,7 @@ def _tree_stats(
         root_now=root_now,
         root_first=with_rstats[0] if with_rstats else None,
         recent=tuple(reversed(stats[-recent:])) if recent else (),
+        growth=growth,
     )
 
 

@@ -19,6 +19,8 @@ from trackdir.capture import Capture, load_capture, write_capture
 from trackdir.cli import main
 from trackdir.db import (
     DbStats,
+    DirGrowth,
+    Growth,
     RootTotals,
     SampleStats,
     SchemaMissing,
@@ -44,6 +46,21 @@ def only_root(base: Capture, tmp_path: Path, name: str, error: ProbeError) -> Pa
     out = tmp_path / f"{name}.jsonl.gz"
     header = replace(base.header, started=later(base), finished=later(base))
     write_capture(out, replace(header, dirs=1, errors=1), [DirProbe(ROOT, error=error)])
+    return out
+
+
+def with_rstats_errors(path: Path, *dirs: bytes) -> Path:
+    """Write a copy of capture PATH with an rstats EIO error at each of DIRS.
+
+    Returns the copy's path: PATH's with "eio-" before the name.
+    """
+    capture = load_capture(path)
+    error = ProbeError(Stage.RSTATS, "EIO")
+    gone = dict(rctime=None, rbytes=None, rfiles=None, rsubdirs=None, error=error)
+    probes = {**capture.probes, **{d: replace(capture.probes[d], **gone) for d in dirs}}
+    header = replace(capture.header, errors=capture.header.errors + len(dirs))
+    out = path.with_name(f"eio-{path.name}")
+    write_capture(out, header, probes.values())
     return out
 
 
@@ -187,6 +204,70 @@ def test_tree_filter_and_recent_limit(db, dsn, subtree, initial, tmp_path):
     assert summarize(db, tree_id=10**9).tree_stats == ()
 
 
+def test_growth_needs_two_samples(db, initial):
+    (tree,) = summarize(db).tree_stats
+    assert tree.growth == ()
+
+
+def test_growth_since_first_and_previous_sample(db, dsn, subtree, initial, tmp_path):
+    a, b = at_depth(subtree, 1)[:2]
+    size = {p: subtree.probes[p].rbytes for p in (a, b)}
+    new = b"0000new"
+    path = edit(subtree, tmp_path, "second", 1, touch=[a, a, a, b, new, new], add=[new])
+    second = replay(dsn, path, max_depth=DEPTH)
+    (tree,) = summarize(db).tree_stats
+    assert tree.growth == (
+        Growth(
+            since=initial.sample_id,
+            depth=1,
+            dirs=(
+                DirGrowth(a, size[a], size[a] + 3),
+                DirGrowth(new, None, 2),
+                DirGrowth(b, size[b], size[b] + 1),
+            ),
+        ),
+    )
+    third = edit(load_capture(path), tmp_path, "third", 1, touch=[b] * 4)
+    replay(dsn, third, max_depth=DEPTH)
+    (tree,) = summarize(db).tree_stats
+    since_first, since_previous = tree.growth
+    assert since_first.since == initial.sample_id
+    assert since_first.dirs == (
+        DirGrowth(b, size[b], size[b] + 5),
+        DirGrowth(a, size[a], size[a] + 3),
+        DirGrowth(new, None, 2),
+    )
+    assert since_previous == Growth(
+        since=second.sample_id,
+        depth=1,
+        dirs=(DirGrowth(b, size[b] + 1, size[b] + 5),),
+    )
+
+
+def test_growth_honors_depth_top_and_ties_by_path(db, dsn, subtree, initial, tmp_path):
+    touched = sorted(at_depth(subtree, 2)[:3], reverse=True)
+    replay(dsn, edit(subtree, tmp_path, "second", 1, touch=touched), max_depth=DEPTH)
+    (growth,) = summarize(db, depth=2, top=2).tree_stats[0].growth
+    assert growth.depth == 2
+    assert [d.path for d in growth.dirs] == sorted(touched)[:2]
+    assert summarize(db, top=0).tree_stats[0].growth == ()
+    (deeper,) = summarize(db, depth=DEPTH + 1).tree_stats[0].growth
+    assert deeper.dirs == ()
+
+
+def test_growth_skips_deleted_dirs_and_rows_without_rstats(db, dsn, subtree, tmp_path):
+    sample.run_db_init(dsn)
+    broken_before, broken_after, grown, removed = at_depth(subtree, 1)[:4]
+    first = edit(subtree, tmp_path, "first", 0)
+    replay(dsn, with_rstats_errors(first, broken_before), max_depth=DEPTH)
+    touch = [broken_before, broken_after, grown, grown]
+    second = edit(subtree, tmp_path, "second", 1, touch=touch, remove=[removed])
+    replay(dsn, with_rstats_errors(second, broken_after), max_depth=DEPTH)
+    (growth,) = summarize(db).tree_stats[0].growth
+    rbytes = subtree.probes[grown].rbytes
+    assert growth.dirs == (DirGrowth(grown, rbytes, rbytes + 2),)
+
+
 T1 = datetime(2026, 10, 16, 20, 48, 11, 500_000, tzinfo=UTC)
 KEY = TreeKey("11111111-2222-4333-8444-555555555555", None, b"/proj/sub", 4)
 
@@ -220,6 +301,17 @@ def stats_of(**changes) -> DbStats:
         root_now=RootTotals(7, 3 * 2**40 + 2**39, 4567890, 72017),
         root_first=RootTotals(5, 3 * 2**40, 4567000, 72018),
         recent=(newest,),
+        growth=(
+            Growth(
+                since=5,
+                depth=1,
+                dirs=(
+                    DirGrowth(b"alpha", 2**40, 2**40 + 2**39),
+                    DirGrowth(b"beta", None, 3 * 2**30),
+                ),
+            ),
+            Growth(since=6, depth=1, dirs=()),
+        ),
     )
     return DbStats(4, 1, 2, 144434, 39542784, (replace(tree, **changes),))
 
@@ -257,6 +349,18 @@ def test_render_text():
         "       7  incremental  2026-10-16T20:48:11Z  13.2 s     962    1        17"
         "        2      41  1000  live\n"
         "  1 older sample not shown\n"
+        "  grew most at depth 1 since sample 5:\n"
+        "    +512.0 GiB  alpha\n"
+        "      +3.0 GiB  beta (new)\n"
+        "  grew most at depth 1 since sample 6: none\n"
+    )
+
+
+def test_render_text_says_when_depth_is_past_the_tree():
+    growth = Growth(since=5, depth=KEY.max_depth + 1, dirs=())
+    text = render_text(stats_of(growth=(growth,)))
+    assert text.endswith(
+        "  grew most at depth 5 since sample 5: none; the tree is sampled to depth 4\n"
     )
 
 
@@ -264,7 +368,7 @@ def test_render_text_marks_hidden_samples_and_missing_root():
     text = render_text(stats_of(samples=12, root_now=None))
     assert "  ROOT:    no rstats in its current row\n" in text
     assert "change:" not in text
-    assert text.endswith("  11 older samples not shown\n")
+    assert "\n  11 older samples not shown\n" in text
 
 
 def test_render_text_of_a_tree_without_samples():
@@ -278,6 +382,7 @@ def test_render_text_of_a_tree_without_samples():
             root_now=None,
             root_first=None,
             recent=(),
+            growth=(),
         )
     )
     assert "  samples: 0\n" in text
@@ -288,6 +393,15 @@ def test_render_text_of_a_tree_without_samples():
 def test_render_text_without_trees():
     text = render_text(replace(stats_of(), tree_stats=()))
     assert text.count("\n") == 1
+
+
+def test_render_text_escapes_undecodable_paths():
+    growth = Growth(since=5, depth=1, dirs=(DirGrowth(b"caf\xe9", 1, 2),))
+    stats = stats_of(key=replace(KEY, fs_path=b"/caf\xe9"), growth=(growth,))
+    text = render_text(stats)
+    text.encode()
+    assert "path /caf\\xe9, depth 4)\n" in text
+    assert "    +1 B  caf\\xe9\n" in text
 
 
 def test_render_json():
@@ -311,6 +425,14 @@ def test_render_json():
     assert newest["started"] == "2026-10-16T20:48:11.500000+00:00"
     assert newest["root"] == "/mnt/cephfs/proj/sub"
     assert newest["kind"] == "incremental"
+    since_first, since_previous = tree["growth"]
+    assert since_first["since"] == 5
+    assert since_first["dirs"][1] == {
+        "path": "beta",
+        "rbytes_before": None,
+        "rbytes_after": 3 * 2**30,
+    }
+    assert since_previous == {"since": 6, "depth": 1, "dirs": []}
 
 
 def test_render_json_keeps_undecodable_paths_ascii():
@@ -351,7 +473,22 @@ def test_cli_without_schema_says_to_init(dsn, capsys):
     assert "trackdir db init" in collapse(capsys.readouterr().err)
 
 
-@pytest.mark.parametrize("args", [["--samples", "-1"], ["--tree", "0"]])
+def test_cli_top_and_depth_select_growth(initial, dsn, subtree, tmp_path, capsys):
+    touched = at_depth(subtree, 2)[:4]
+    replay(dsn, edit(subtree, tmp_path, "second", 1, touch=touched), max_depth=DEPTH)
+    assert main(["db", "summary", "--db", dsn, "--depth", "2", "--top", "4"]) == 0
+    stdout = capsys.readouterr().out
+    assert "  grew most at depth 2 since sample 1:\n" in stdout
+    for path in touched:
+        assert f"    +1 B  {os.fsdecode(path)}\n" in stdout
+    assert main(["db", "summary", "--db", dsn, "--top", "0"]) == 0
+    assert "grew most" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--samples", "-1"], ["--tree", "0"], ["--top", "-1"], ["--depth", "0"]],
+)
 def test_cli_usage_errors(args, capsys):
     with pytest.raises(SystemExit) as exc:
         main(["db", "summary", "--db", "x", *args])

@@ -1,7 +1,6 @@
 """What the database commands share: the DSN, connecting, and error messages."""
 
 import contextlib
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -106,9 +105,17 @@ def tree_identity(key: TreeKey) -> str:
     """
     fs = "default filesystem" if key.fs_name is None else f"filesystem {key.fs_name}"
     return (
-        f"cluster {key.cluster_fsid}, {fs}, path {os.fsdecode(key.fs_path)}, "
+        f"cluster {key.cluster_fsid}, {fs}, path {display_path(key.fs_path)}, "
         f"depth {key.max_depth}"
     )
+
+
+def display_path(path: bytes) -> str:
+    r"""Return PATH as UTF-8 text, with bytes that do not decode as \xNN.
+
+    Unlike fsdecode's surrogates, the result can be written to any UTF-8 stream.
+    """
+    return path.decode(errors="backslashreplace")
 
 
 def utc(moment: datetime) -> str:

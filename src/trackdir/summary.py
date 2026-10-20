@@ -7,8 +7,15 @@ from collections.abc import Sequence
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 
-from trackdir.db import DbStats, RootTotals, SampleStats, TreeStats, summarize
-from trackdir.dbcli import DB_UNCHANGED, database, tree_identity, utc
+from trackdir.db import (
+    DbStats,
+    Growth,
+    RootTotals,
+    SampleStats,
+    TreeStats,
+    summarize,
+)
+from trackdir.dbcli import DB_UNCHANGED, database, display_path, tree_identity, utc
 from trackdir.messages import FatalError, describe_errors
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
@@ -27,13 +34,15 @@ _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
 )
 
 
-def run_summary(dsn: str, tree_id: int | None, recent: int) -> DbStats:
+def run_summary(
+    dsn: str, tree_id: int | None, recent: int, top: int, depth: int
+) -> DbStats:
     """Return the statistics of DSN's database; see db.summarize.
 
     Raises FatalError, also if tree TREE_ID does not exist.
     """
     with database(dsn, DB_UNCHANGED) as conn:
-        stats = summarize(conn, tree_id, recent)
+        stats = summarize(conn, tree_id, recent, top, depth)
     if tree_id is not None and not stats.tree_stats:
         raise FatalError(
             f"the database has no tree {tree_id}. Run trackdir db summary without "
@@ -96,7 +105,30 @@ def _tree_lines(tree: TreeStats) -> list[str]:
     if hidden := tree.samples - len(tree.recent):
         noun = "older sample" if tree.recent else "sample"
         lines.append(f"  {_count(hidden, noun)} not shown")
+    for growth in tree.growth:
+        lines += _growth_lines(growth, tree.key.max_depth)
     return lines
+
+
+def _growth_lines(growth: Growth, max_depth: int) -> list[str]:
+    """Return a heading and a line per directory, or one line if none grew."""
+    heading = f"  grew most at depth {growth.depth} since sample {growth.since}:"
+    if not growth.dirs:
+        if growth.depth > max_depth:
+            return [f"{heading} none; the tree is sampled to depth {max_depth}"]
+        return [f"{heading} none"]
+    sizes = [
+        _signed_bytes(d.rbytes_after - (d.rbytes_before or 0)) for d in growth.dirs
+    ]
+    width = max(map(len, sizes))
+    return [
+        heading,
+        *(
+            f"    {size:>{width}}  {display_path(d.path)}"
+            + (" (new)" if d.rbytes_before is None else "")
+            for size, d in zip(sizes, growth.dirs, strict=True)
+        ),
+    ]
 
 
 def _root_lines(now: RootTotals | None, first: RootTotals | None) -> list[str]:
@@ -107,14 +139,19 @@ def _root_lines(now: RootTotals | None, first: RootTotals | None) -> list[str]:
         f"{_count(now.rsubdirs, 'directory')}, last changed in sample {now.sample_id}"
     ]
     if first is not None and first.sample_id != now.sample_id:
-        size = format_bytes(now.rbytes - first.rbytes)
         lines.append(
-            f"  change:  {'' if size.startswith('-') else '+'}{size}, "
+            f"  change:  {_signed_bytes(now.rbytes - first.rbytes)}, "
             f"{_count(now.rfiles - first.rfiles, 'file', signed=True)}, "
             f"{_count(now.rsubdirs - first.rsubdirs, 'directory', signed=True)} "
             f"since sample {first.sample_id}"
         )
     return lines
+
+
+def _signed_bytes(size: int) -> str:
+    """Return format_bytes(SIZE) with a sign, e.g. "+0 B" or "-1.5 KiB"."""
+    text = format_bytes(size)
+    return text if text.startswith("-") else "+" + text
 
 
 def _count(n: int, noun: str, *, signed: bool = False) -> str:

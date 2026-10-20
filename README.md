@@ -7,8 +7,8 @@ metadata request instead of a full scan.
 
 Status: `trackdir capture` works, `trackdir sample` stores samples of a
 tree in PostgreSQL (the first one holds every directory, later ones only what
-changed), and `trackdir db summary` reports what the database holds. Queries
-by size growth are not written yet.
+changed), and `trackdir db summary` reports what the database holds,
+including the directories that grew the most.
 
 ## Requirements
 
@@ -176,12 +176,15 @@ string or URI. Put the password in `~/.pgpass` or `PGPASSWORD`, never in
     trackdir db summary                  # every tree, its 10 newest samples
     trackdir db summary --tree 3 --samples 50
     trackdir db summary --json | jq '.trees[] | {id, current_dirs}'
+    trackdir db summary --depth 2 --top 10
 
 `db summary` is read-only and prints to stdout: the database's totals (trees,
 samples, `dir_state` rows, size on disk), then for each tree its identity, its
 samples' time span, its current directories and errors, ROOT's rbytes, rfiles
-and rsubdirs with their change since the tree's first sample, and a table of
-the newest samples (placeholders):
+and rsubdirs with their change since the tree's first sample, a table of the
+newest samples, and the `--top` directories at `--depth` below ROOT whose
+rbytes grew the most since the tree's first sample and since its second-to-last
+(placeholders):
 
     Tree 1 (cluster 1111…, default filesystem, path /proj/sub, depth 4)
       samples: 2, 2026-10-16T20:48:11Z to 2026-10-16T20:48:30Z
@@ -191,11 +194,18 @@ the newest samples (placeholders):
       sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
            1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
+      grew most at depth 1 since sample 1:
+        +12.0 GiB  proj-a
+         +8.5 GiB  proj-b
 
 A stored directory is new if it had no current row before the sample, else
 modified; deleted counts tombstones. ROOT's rstats cover its whole subtree,
 not just the tracked space. Telling new from modified reads every `dir_state`
 row of the trees reported, so the report takes time in proportion to them.
+Growth since the first sample needs 2 samples, since the second-to-last 3;
+both windows end at the latest sample. A directory new in a window grows from 0 and is
+marked `(new)`; one without rstats at either end, or deleted by the end, is
+left out. `--top 0` skips growth.
 `--json` gives the same data as one JSON document, with paths fsdecoded as in
 captures and times in ISO 8601 UTC.
 

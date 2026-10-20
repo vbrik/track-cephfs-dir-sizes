@@ -219,7 +219,7 @@ def test_render_sample_summary():
 def test_describe_tree_includes_depth():
     key = TreeKey("fsid", None, b"/caf\xe9", 3)
     assert describe_tree(key) == (
-        "tree (cluster fsid, default filesystem, path /caf\udce9, depth 3)"
+        "tree (cluster fsid, default filesystem, path /caf\\xe9, depth 3)"
     )
 
 

@@ -101,8 +101,9 @@ DB_INIT_EPILOG = _exit_status(dbcli.DB_UNCHANGED, "also when the schema already 
 DB_SUMMARY_DESCRIPTION = f"""\
 Report what the database given by --db or {dbcli.DSN_ENV} holds: totals, then
 for each tree its samples, its current directories and errors, ROOT's size and
-its change since the first sample, and the newest samples with what each
-stored. Read-only; the report goes to stdout.
+its change since the first sample, the newest samples with what each stored,
+and the directories at --depth whose rbytes grew the most since the first
+sample and since the second-to-last. Read-only; the report goes to stdout.
 """
 
 DB_SUMMARY_EPILOG = f"""\
@@ -110,6 +111,11 @@ A sample is initial if its tree had no current directories before it, else
 incremental. A directory a sample stored is new if it had no current row
 before the sample, else modified; deleted counts its tombstones. Telling them
 apart reads every stored row of the trees reported.
+
+Growth since the first sample needs 2 samples, since the second-to-last 3;
+both windows end at the latest sample. A directory new in a window grows from 0 and is
+marked (new); one without rstats at either end, or gone by the end, is left
+out. --top 0 skips growth.
 
 {_exit_status(dbcli.DB_UNCHANGED)}"""
 
@@ -286,7 +292,8 @@ def _prepare_db_summary(args: argparse.Namespace) -> _Command:
     render = summary.render_json if args.json else summary.render_text
 
     def run() -> str:
-        sys.stdout.write(render(summary.run_summary(dsn, args.tree, args.samples)))
+        stats = summary.run_summary(dsn, args.tree, args.samples, args.top, args.depth)
+        sys.stdout.write(render(stats))
         return ""
 
     return _Command(run, dbcli.DB_UNCHANGED)
@@ -512,6 +519,20 @@ def _parser() -> argparse.ArgumentParser:
         default=10,
         metavar="N",
         help="list the N newest samples of each tree (default: %(default)s)",
+    )
+    summarize.add_argument(
+        "--top",
+        type=_int_between(0, MAX_DIRS_LIMIT),
+        default=3,
+        metavar="N",
+        help="list the N directories that grew the most (default: %(default)s)",
+    )
+    summarize.add_argument(
+        "--depth",
+        type=_int_between(1, MAX_DEPTH_LIMIT),
+        default=1,
+        metavar="N",
+        help="rank directories at depth N below ROOT (default: %(default)s)",
     )
     summarize.add_argument(
         "--json", action="store_true", help="print JSON instead of text"
