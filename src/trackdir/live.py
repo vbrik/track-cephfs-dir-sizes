@@ -50,12 +50,14 @@ DEFAULT_LIMIT_ADVICE = "Raise --max-dirs if memory allows, or lower --max-depth.
 
 MSG_NO_OPENAT2_AS_ROOT = (
     "this kernel does not provide openat2 (Linux 5.6+), which trackdir needs "
-    "to walk user-writable trees safely as root. Run it on a newer kernel."
+    "as root to keep a walk of user-writable trees from entering other mounts. "
+    "Run it on a newer kernel, or as another user."
 )
 MSG_NO_OPENAT2 = (
     "this kernel does not provide openat2 (Linux 5.6+), so directories are "
     "opened one path component at a time. Symlinks are still never followed, "
-    "but mount points are detected only after they are opened."
+    "but mount points are detected only after they are opened, and bind "
+    "mounts of ROOT's own filesystem are not detected."
 )
 MSG_NO_DIRSTAT = (
     "ROOT's mount lacks the dirstat option, so each directory costs four MDS "

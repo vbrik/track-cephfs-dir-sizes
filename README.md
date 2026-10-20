@@ -14,7 +14,10 @@ including the directories that grew the most.
 
 - Linux with the CephFS kernel client; trackdir reads the mount table to
   identify ROOT's filesystem and fails on other clients (e.g. ceph-fuse).
-- openat2 (Linux 5.6+); required when running as root.
+- openat2 (Linux 5.6+); required when running as root. Without it, trackdir
+  still never follows symlinks, but it detects a mount point only after
+  opening it and misses bind mounts of ROOT's own filesystem, so it refuses
+  to walk as root.
 - Python 3.12 or newer. `capture` has no other dependencies; `sample` and
   `db init` need psycopg and a PostgreSQL server.
 - Recommended: the `dirstat` mount option. It cuts the metadata requests

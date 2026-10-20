@@ -1,12 +1,18 @@
 """Open directories beneath ROOT without following symlinks or leaving its mount.
 
 Production runs as root over user-writable trees, so a user must not be able to
-redirect trackdir with a symlink. openat2(2) with RESOLVE_BENEATH |
+redirect trackdir with a symlink or a mount. openat2(2) with RESOLVE_BENEATH |
 RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV resolves a whole relative path safely in
 one syscall, so work items can be plain paths and no parent fds are held.
-CPython has no wrapper, so it is called through ctypes. Without openat2, paths
-are opened one component at a time with O_NOFOLLOW; that detects mount
-crossings only after the open.
+CPython has no wrapper, so it is called through ctypes.
+
+Without openat2, paths are opened one component at a time with O_NOFOLLOW,
+each relative to the previous component's fd. That is as safe against
+symlinks, but weaker against mounts: a crossing is detected by comparing
+st_dev only after the open, so root has already looked up and opened a
+directory on the other filesystem (e.g. a user's FUSE mount, whose daemon can
+stall the open), and a bind mount of ROOT's own filesystem has the same st_dev
+and is not detected at all. That is why live.py refuses the fallback as root.
 """
 
 import ctypes
