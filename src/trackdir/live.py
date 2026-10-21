@@ -44,7 +44,7 @@ from trackdir.walker import DirLimitExceeded, walk
 # the limit. A sample also holds the baseline: ~0.5 GB per million current
 # directories, more while loading.
 DEFAULT_MAX_DIRS = 10_000_000
-DEFAULT_JOBS = 32  # concurrent probes; each mostly waits on MDS round trips
+DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.
 DEFAULT_LIMIT_ADVICE = "Raise --max-dirs if memory allows, or lower --max-depth."
 
