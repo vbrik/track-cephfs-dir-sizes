@@ -76,14 +76,16 @@ Example (placeholders):
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
            1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
       grew most since sample 1, by own growth:
-              own  of ROOT      total  directory
-        +12.0 GiB      58%  +12.0 GiB  /proj/sub/proj-a/run/2026 (subtree)
-         +8.1 GiB      39%   +8.5 GiB  /proj/sub/proj-b
+               own  share       total  directory
+         +12.0 GiB    58%   +12.0 GiB  /proj/sub/proj-a/run/2026/raw (subtree)
+          +8.1 GiB    39%    +8.5 GiB  /proj/sub/proj-b
+        +409.6 MiB     1%  +409.6 MiB  /proj/sub/proj-b/2025/q4/raw (subtree)
 
 A directory's own growth is that of the files directly in it, not of its
 subdirectories, so the list points at where the growth is, at any depth.
-A directory at max depth includes everything below it and is marked
-(subtree). Growth spread thinly over many directories does not stand out.
+A directory at max depth, or above a part of the tree that could not be
+read, owns the growth below it and is marked (subtree). Growth spread
+thinly over many directories does not stand out.
 
 ## Capture directory state
 

@@ -23,7 +23,7 @@ from trackdir.model import fs_absolute
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
 _GROWTH_COLUMNS = (  # (header, right-aligned) of the growth table
     ("own", True),
-    ("of ROOT", True),
+    ("share", True),
     ("total", True),
     ("directory", False),
 )
@@ -119,8 +119,9 @@ def _tree_lines(tree: TreeStats) -> list[str]:
 def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
     """Return a heading and a table of directories, or one line if none grew.
 
-    Each directory shows its own growth, its share of ROOT's growth and its
-    total growth; directories show as absolute paths in tree KEY's filesystem.
+    Each directory shows its own growth, its share of all positive own growth
+    and its total growth; directories show as absolute paths in tree KEY's
+    filesystem.
     """
     heading = f"  grew most since sample {growth.since}, by own growth:"
     if not growth.dirs:
@@ -133,7 +134,7 @@ def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
         rows.append(
             [
                 _signed_bytes(d.own),
-                _share(d.own, growth.root),
+                _share(d.own, growth.positive_own),
                 _signed_bytes(d.rbytes_after - (d.rbytes_before or 0)),
                 path + (f" ({', '.join(marks)})" if marks else ""),
             ]
@@ -141,13 +142,8 @@ def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
     return [heading, *("  " + line for line in _table(_GROWTH_COLUMNS, rows))]
 
 
-def _share(part: int, whole: int | None) -> str:
-    """Return PART as a percentage of WHOLE rounded down, "<1%" if below 1.
-
-    Without a positive WHOLE, the share is meaningless: return "-".
-    """
-    if whole is None or whole <= 0:
-        return "-"
+def _share(part: int, whole: int) -> str:
+    """Return PART as a percentage of WHOLE rounded down, "<1%" if below 1."""
     percent = part * 100 // whole
     return f"{percent}%" if percent else "<1%"
 

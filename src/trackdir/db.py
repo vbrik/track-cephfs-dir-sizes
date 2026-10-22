@@ -7,6 +7,7 @@ module's functions become DbError; KeyboardInterrupt propagates as is.
 Writes run in one transaction each, so a failure or interrupt stores nothing.
 """
 
+import heapq
 import os
 from collections import Counter
 from collections.abc import Iterator
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from trackdir.baseline import ROW_COLUMNS, Baseline, Row, SampleDiff, row_of
 from trackdir.capture import CaptureHeader
-from trackdir.model import ROOT, DirProbe
+from trackdir.model import ROOT, DirProbe, path_depth, split
 
 if TYPE_CHECKING:
     import psycopg
@@ -260,11 +261,12 @@ class Growth:
     """The directories whose own growth was the greatest since a sample.
 
     The window runs from sample SINCE to the tree's latest sample. Directories
-    without rstats at either end, and those gone by the end, are left out.
+    gone by the end, with an unknown growth or with an own growth of 0 or less
+    are left out.
     """
 
     since: int
-    root: int | None  # ROOT's rbytes growth; None without rstats at either end
+    positive_own: int  # the sum of all positive own growths, listed or not
     dirs: tuple[DirGrowth, ...]  # most own growth first, ties by path
 
 
@@ -508,7 +510,8 @@ def summarize(
     newest samples, and the TOP directories with the most own growth since its
     first sample, given 2 samples, and since its second-to-last, given 3; TOP 0
     skips growth. Telling new rows from modified ones, and so a sample's kind,
-    sorts every dir_state row of the trees; so does each growth window. One
+    sorts every dir_state row of the trees; growth reads each tree's current
+    state, and for each window the earlier rows of the paths changed since. One
     READ ONLY REPEATABLE READ transaction keeps all numbers consistent. Raises
     SchemaMissing or SchemaVersionMismatch unless the schema is current.
     """
@@ -521,10 +524,6 @@ def summarize(
         samples = _group(cur.execute(_SAMPLES, params))
         roots = _group(cur.execute(_ROOT_ROWS, {**params, "root": ROOT}))
         errors = _group(cur.execute(_CURRENT_ERRORS, params))
-        # A small sample table may never be analyzed, and then the planner
-        # takes each growth CTE for a few rows and joins them in nested loops:
-        # minutes instead of seconds for 200000 directories.
-        cur.execute("SET LOCAL enable_nestloop = off")
         growth = {
             tree_id: _growth(cur, tree_id, max_depth, samples.get(tree_id, []), top)
             for tree_id, *_, max_depth in trees
@@ -592,105 +591,28 @@ WHERE error_stage IS NOT NULL AND {_IN_TREE.format(column="tree_id")}
 GROUP BY tree_id, error_stage, error_code
 """
 
-# ROOT's rbytes growth in tree %(tree)s from sample %(since)s, started at
-# %(started)s, to the latest sample, and the %(top)s directories with the most
-# own growth in it, most first, ties by path; no directory gives one row of
-# NULLs. A path's state at a sample is its latest row up to it, in the view's
-# order; a path is present if that row is no tombstone. A path present at the
-# end grows by its rbytes then minus its rbytes at the start; one absent at the
-# start grows from 0, but only if its nearest ancestor present at the start was
-# listed (no error, or rstats only, as in capture.is_listed): below an unlisted
-# one it may have existed unseen. A path gone by the end grows by minus its
-# rbytes at the start. Without rstats, growth is unknown. A path's own growth
-# is its growth minus that of each path whose nearest ancestor with a known
-# growth it is; such a path with an unknown growth makes it a subtree, as does
-# being unlisted at the end. Ancestors are found by prefix in the escaped path:
-# escaping changes only backslashes and bytes outside printable ASCII. Only
-# paths flagged as new, or with a parent that may lack a known growth, look
-# past their parent: listing every path's ancestors would cost seconds.
-_GROWTH = """WITH history AS (
-    SELECT d.path, d.rbytes, d.error_stage, d.deleted, s.started, s.id
-    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    WHERE s.tree_id = %(tree)s
-), before AS (
-    SELECT DISTINCT ON (path) path, rbytes, error_stage, deleted FROM history
-    WHERE (started, id) <= (%(started)s, %(since)s)
-    ORDER BY path, started DESC, id DESC
-), after AS (
-    SELECT DISTINCT ON (path) path, rbytes, error_stage, deleted FROM history
-    ORDER BY path, started DESC, id DESC
-), dirs AS (
-    SELECT path, encode(path, 'escape') AS epath,
-           b.path IS NOT NULL AS was, b.rbytes AS rbytes_before,
-           b.error_stage AS error_before,
-           a.path IS NOT NULL AS alive, a.rbytes AS rbytes_after,
-           a.error_stage AS error_after
-    FROM (SELECT * FROM after WHERE NOT deleted) a
-    FULL JOIN (SELECT * FROM before WHERE NOT deleted) b USING (path)
-), parented AS (
-    SELECT *, CASE WHEN path = %(root)s THEN NULL
-                   WHEN position('/' IN epath) = 0 THEN '.'
-                   ELSE regexp_replace(epath, '/[^/]*$', '')
-              END AS parent
-    FROM dirs
-), flagged AS (
-    SELECT d.epath FROM parented d LEFT JOIN dirs p ON p.epath = d.parent
-    WHERE d.parent IS NOT NULL
-      AND (p.epath IS NULL OR NOT p.was OR NOT d.was
-           OR p.rbytes_before IS NULL OR p.alive AND p.rbytes_after IS NULL)
-), ancestry AS (
-    SELECT f.epath,
-           CASE WHEN n = 0 THEN '.' ELSE array_to_string(part[1:n], '/') END
-               AS ancestor,
-           n AS depth
-    FROM flagged f, string_to_array(f.epath, '/') part,
-         generate_series(0, cardinality(part) - 1) n
-), unseen AS (
-    SELECT DISTINCT ON (an.epath) an.epath,
-           p.error_before IN ('open', 'stat', 'readdir') AS unseen
-    FROM dirs d JOIN ancestry an ON an.epath = d.epath
-    JOIN dirs p ON p.epath = an.ancestor AND p.was
-    WHERE d.alive AND NOT d.was
-    ORDER BY an.epath, an.depth DESC
-), delta AS (
-    SELECT d.*,
-           CASE WHEN NOT d.alive THEN -d.rbytes_before
-                WHEN d.was THEN d.rbytes_after - d.rbytes_before
-                WHEN u.unseen IS NOT TRUE THEN d.rbytes_after
-           END AS grew
-    FROM parented d LEFT JOIN unseen u USING (epath)
-), owner AS (
-    SELECT d.epath, d.parent AS ancestor FROM delta d
-    WHERE d.parent IS NOT NULL
-      AND NOT EXISTS (SELECT FROM flagged f WHERE f.epath = d.epath)
-    UNION ALL (
-        SELECT DISTINCT ON (an.epath) an.epath, an.ancestor
-        FROM ancestry an
-        JOIN delta v ON v.epath = an.ancestor AND v.grew IS NOT NULL
-        ORDER BY an.epath, an.depth DESC
-    )
-), absorbed AS (
-    SELECT o.ancestor AS epath, sum(d.grew)::bigint AS below,
-           bool_or(d.grew IS NULL) AS unknown
-    FROM owner o JOIN delta d USING (epath)
-    GROUP BY o.ancestor
-)
-SELECT (SELECT grew FROM delta WHERE path = %(root)s), r.*
-FROM (VALUES (1)) one LEFT JOIN LATERAL (
-    SELECT d.path, CASE WHEN d.was THEN d.rbytes_before END, d.rbytes_after,
-           d.grew - coalesce(a.below, 0) AS own,
-           coalesce(a.unknown, false)
-           OR coalesce(d.error_after IN ('open', 'stat', 'readdir'), false)
-           OR CASE WHEN d.parent IS NULL THEN 0
-                   ELSE cardinality(string_to_array(d.epath, '/'))
-              END >= %(max_depth)s
-    FROM delta d LEFT JOIN absorbed a USING (epath)
-    WHERE d.alive AND d.grew - coalesce(a.below, 0) > 0
-    ORDER BY own DESC, d.path
-    LIMIT %(top)s
-) r ON true
-ORDER BY r.own DESC, r.path
+# Each current path of tree %(tree)s, with its rbytes and error stage.
+_CURRENT_ENDS = """SELECT path, rbytes, error_stage FROM trackdir.current_dir_state
+WHERE tree_id = %(tree)s
 """
+# Each path with a row in samples %(later)s, with its latest row in samples
+# %(earlier)s, oldest first: rbytes, error stage and deleted, or NULLs if none.
+_START_ENDS = """WITH later AS (
+    SELECT DISTINCT path FROM trackdir.dir_state WHERE sample_id = ANY(%(later)s)
+)
+SELECT l.path, b.rbytes, b.error_stage, b.deleted
+FROM later l LEFT JOIN (
+    SELECT DISTINCT ON (d.path) d.path, d.rbytes, d.error_stage, d.deleted
+    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
+    WHERE d.sample_id = ANY(%(earlier)s) AND d.path IN (SELECT path FROM later)
+    ORDER BY d.path, s.started DESC, s.id DESC
+) b USING (path)
+"""
+# Error stages that leave a directory's subdirectories unread (capture.is_listed)
+_UNLISTING = frozenset({"open", "stat", "readdir"})
+
+# A path's (rbytes, error stage) at one end of a growth window; None: absent.
+End = tuple[int | None, str | None] | None
 
 
 def _growth(
@@ -702,27 +624,95 @@ def _growth(
 ) -> tuple[Growth, ...]:
     """Return tree TREE_ID's growth windows; see summarize.
 
-    SAMPLES are the tree's _SAMPLES rows, oldest first, without tree_id.
+    SAMPLES are the tree's _SAMPLES rows, oldest first, without tree_id. A
+    path's state at a window's start is its current one unless it has rows in
+    later samples, so only those paths' earlier rows are read.
     """
-    if not top:
+    if not top or len(samples) < 2:
         return ()
-    starts = [samples[0]] if len(samples) >= 2 else []
-    if len(samples) >= 3:
-        starts.append(samples[-2])
+    ids = [sample_id for sample_id, *_ in samples]
+    current = {
+        path: (rbytes, stage)
+        for path, rbytes, stage in cur.execute(_CURRENT_ENDS, {"tree": tree_id})
+    }
+    starts = [0] if len(samples) < 3 else [0, len(samples) - 2]
     windows = []
-    for since, started, *_ in starts:
-        params = {
-            "tree": tree_id,
-            "root": ROOT,
-            "max_depth": max_depth,
-            "since": since,
-            "started": started,
-            "top": top,
+    for start in starts:
+        params = {"earlier": ids[: start + 1], "later": ids[start + 1 :]}
+        changed = {
+            path: None if deleted in (None, True) else (rbytes, stage)
+            for path, rbytes, stage, deleted in cur.execute(_START_ENDS, params)
         }
-        rows = cur.execute(_GROWTH, params).fetchall()
-        dirs = tuple(DirGrowth(*row[1:]) for row in rows if row[1] is not None)
-        windows.append(Growth(since, rows[0][0], dirs))
+        ends = {path: (changed.get(path, now), now) for path, now in current.items()}
+        for path, then in changed.items():
+            if path not in current and then is not None:
+                ends[path] = (then, None)
+        positive, dirs = own_growth(ends, max_depth, top)
+        windows.append(Growth(ids[start], positive, dirs))
     return tuple(windows)
+
+
+def own_growth(
+    ends: dict[bytes, tuple[End, End]], max_depth: int, top: int
+) -> tuple[int, tuple[DirGrowth, ...]]:
+    """Return the sum of all positive own growths, and the TOP directories with
+    the most own growth, most first, ties by path.
+
+    ENDS maps each path present at either end of a window to its states at the
+    start and at the end; the tree is sampled to MAX_DEPTH. A present path
+    grows by its rbytes at the end minus those at the start, from 0 if new; a
+    path gone by the end by minus its rbytes at the start. Growth is unknown
+    without rstats, and below a directory unlisted at either end: its subtree
+    was not read, so a row there may predate the window's start or end, or a
+    new path may have existed unseen. A path's own growth is its growth minus
+    that of each path whose nearest ancestor with a known growth it is; such a
+    path with an unknown growth makes it a subtree, as does being unlisted at
+    the end or at MAX_DEPTH. Directories gone by the end, with an unknown
+    growth or with an own growth of 0 or less are left out.
+    """
+
+    def unlisting(end: End) -> bool:
+        return end is not None and end[1] in _UNLISTING
+
+    unread: dict[bytes, bool] = {}
+    for path in sorted(ends, key=path_depth):
+        if path != ROOT:
+            parent = split(path)[0]
+            unread[path] = unread.get(parent, False) or any(
+                map(unlisting, ends.get(parent, ()))
+            )
+    grew: dict[bytes, int | None] = {}
+    for path, (then, now) in ends.items():
+        if unread.get(path):
+            grew[path] = None
+        elif now is None:
+            grew[path] = None if then is None or then[0] is None else -then[0]
+        elif now[0] is None or (then is not None and then[0] is None):
+            grew[path] = None
+        else:
+            grew[path] = now[0] - (0 if then is None else then[0])
+    below: Counter[bytes] = Counter()
+    hidden: set[bytes] = set()
+    for path, growth in grew.items():
+        owner = path
+        while owner != ROOT:
+            owner = split(owner)[0]
+            if grew.get(owner) is not None:
+                if growth is None:
+                    hidden.add(owner)
+                else:
+                    below[owner] += growth
+                break
+    owned = []
+    for path, growth in grew.items():
+        then, now = ends[path]
+        if now is None or growth is None or growth - below[path] <= 0:
+            continue
+        subtree = path in hidden or unlisting(now) or path_depth(path) >= max_depth
+        before = None if then is None else then[0]
+        owned.append(DirGrowth(path, before, now[0], growth - below[path], subtree))
+    positive = sum(d.own for d in owned)
+    return positive, tuple(heapq.nsmallest(top, owned, key=lambda d: (-d.own, d.path)))
 
 
 def _group(rows: Iterator[tuple]) -> dict[int, list[tuple]]:

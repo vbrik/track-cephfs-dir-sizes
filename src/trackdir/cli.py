@@ -116,18 +116,21 @@ Growth since the first sample needs 2 samples, since the second-to-last 3;
 both windows end at the latest sample. A directory's growth is that of its
 rbytes; its own growth is that minus the growth of its subdirectories: the
 growth of the files directly in it. Own growths add up to ROOT's growth, so
-none is counted twice; "of ROOT" is that share. A directory below max depth
-is not stored, so its growth shows in its ancestor at max depth, whose own
-growth is then its subtree's; so does that of a subdirectory of an unlisted
-directory (an error other than rstats) or of one without rstats at either
-end. Such a directory is marked (subtree): its growth is somewhere below it.
-Growth spread over many subdirectories, each growing a little, makes none
-of them rank, and does not rank their parent either.
+none is counted twice; "share" is a directory's part of all positive own
+growth. A directory at max depth owns the growth of its whole subtree, which
+is not stored. Below a directory unlisted at either end (an error other than
+rstats), the subtree was not read then, so growth there is unknown; so is
+the growth of a directory without rstats at either end. The nearest ancestor
+with a known growth owns an unknown growth. Directories that own growth of
+subdirectories are marked (subtree): it is somewhere below them. Growth
+spread over many subdirectories, each growing a little, makes none of them
+rank, and does not rank their parent either. CephFS propagates rstats upward
+with a delay, so within a window a directory's own growth can be off by its
+children's latest changes.
 
-A directory new in a window grows from 0 and is marked (new), unless its
-nearest ancestor at the start was not listed, so it may have existed unseen;
-then its growth is unknown. A directory with an unknown growth, or gone by
-the end, is left out. --top 0 skips growth.
+A directory new in a window grows from 0 and is marked (new). A directory
+gone by the end, or with an unknown growth, is left out. --top 0 skips
+growth.
 
 {_exit_status(dbcli.DB_UNCHANGED)}"""
 
