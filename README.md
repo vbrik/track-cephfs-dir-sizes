@@ -116,8 +116,10 @@ Tests need neither Ceph nor root. Database tests run only when
 database whose name does not end in `_test`.
 
 `scripts/postgres.py --help` lists the dev server's commands (`reset` and
-`destroy` delete its data). Any local user can connect to it, so keep real
-data out of it.
+`destroy` delete its data). Several servers can run side by side, e.g.
+`scripts/postgres.py --name pg-other --port 5433 start`; `list` shows them.
+Any local user can connect to them, so keep real data out of them. A server
+on an address other than loopback needs `--password` (or `TRACKDIR_PG_PASSWORD`).
 
 ## Documentation
 

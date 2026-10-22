@@ -9,6 +9,24 @@ only, argparse) so that it can grow without complex bash; read
 `postgres.sh` and bash below as that script. Usage errors now exit 2, the
 `help` command word is gone (use `--help`), and every argument after `psql`,
 `--help` included, goes to psql.
+Amended again 2026-10-22: several instances, so that databases for different
+purposes can run side by side. Global options before COMMAND, each with an
+environment variable that it overrides: `--name` (`TRACKDIR_PG_CONTAINER`,
+default `trackdir-postgres`), `--address` (`TRACKDIR_PG_ADDRESS`, IPv4 only,
+default `127.0.0.1`), `--port` (`TRACKDIR_PG_PORT`) and `--volume`
+(`TRACKDIR_PG_VOLUME`, default `NAME-data`, so the default volume is now
+`trackdir-postgres-data`). Address, port and volume are recorded in labels
+`trackdir.address`, `trackdir.port` and `trackdir.volume` at creation;
+afterwards the labels win, and settings that differ are warned about and
+ignored. `destroy --keep-volume` removes only the container, so that it can be
+recreated with other settings on the same data. `start` refuses a volume that
+another container uses (two servers on one data directory corrupt it), and
+refuses an address other than loopback while the password is the public
+default; `--password` (`TRACKDIR_PG_PASSWORD`; the option shows in the
+process list, accepted as these are development machines) sets it, and `start` re-applies the container's password with
+`ALTER ROLE` because the image sets it only when initializing an empty
+volume. New command `list`. `destroy` names only what it removed. Section 3's "Binding" and "Names" below describe
+the defaults.
 
 ## 1. Purpose
 
