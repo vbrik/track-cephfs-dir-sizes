@@ -11,6 +11,12 @@ the key it only split a tree's history whenever the limit (or its default)
 was raised. See the "`max_dirs` in the identity" item of section 10. Where
 this spec still lists `max_dirs` as a key field, that is superseded.
 
+Amended 2026-10-22: pruning still has no pinned-rctime rule, but the
+incremental message now counts the pruned directories whose rctime is later
+than the sample's start, e.g. `31 unchanged subtrees skipped (12 with a
+pinned rctime, under which a same-size rewrite goes unseen)`, shown only when
+the count is above 0. See "Pinned rctime" in section 10.
+
 ## 1. Goal and scope
 
 `trackdir sample` stores a tree's first sample (initial-sample spec). This

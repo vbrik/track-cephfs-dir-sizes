@@ -328,3 +328,24 @@ def test_second_sample_prints_incremental_summary(
     assert stdout == ""
     assert collapse(stderr).startswith("Stored sample 2 (incremental): probed")
     assert "5 changed, 0 deleted" in collapse(stderr)
+
+
+def test_pruned_directory_with_a_pinned_rctime_is_counted(db, dsn, subtree, tmp_path):
+    errors = [p for p in subtree.probes if subtree.probes[p].error]
+    pinned = next(
+        p.path
+        for p in subtree.probes.values()
+        if p.depth == 1
+        and p.error is None
+        and not any(e.startswith(p.path + b"/") for e in errors)
+    )
+    probes = dict(subtree.probes)
+    for path in (pinned, ROOT):  # as CephFS would: rctime is a maximum
+        probes[path] = replace(probes[path], rctime=4294967295 * 10**9)
+    first = tmp_path / "pinned.jsonl.gz"
+    write_capture(first, subtree.header, probes.values())
+    sample.run_db_init(dsn)
+    replay(dsn, first)
+    res, _ = sample_edit(dsn, load_capture(first), tmp_path, "second")
+    assert res.skipped_pinned == 1
+    assert "(1 with a pinned rctime," in collapse(sample.render_sample_summary(res))

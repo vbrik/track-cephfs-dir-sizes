@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -117,9 +117,9 @@ def test_error_baseline_forces_listing_of_ancestors():
 
 def test_diff_unchanged_stores_nothing():
     b = baseline_of(probe(ROOT), probe(b"a"))
-    result = diff(b, [probe(ROOT, children=(b"a",)), probe(b"a")], MAX_DEPTH)
+    result = diff(b, [probe(ROOT, children=(b"a",)), probe(b"a")], MAX_DEPTH, T)
     # The unchanged "a" was pruned, hence not listed.
-    assert result == SampleDiff(changed=[], deleted=[], skipped=1)
+    assert result == SampleDiff(changed=[], deleted=[], skipped=1, skipped_pinned=0)
 
 
 def test_diff_changed_and_new_are_stored_in_tree_order():
@@ -130,7 +130,7 @@ def test_diff_changed_and_new_are_stored_in_tree_order():
         probe(b"b"),
         probe(b"n"),
     ]
-    result = diff(b, probes, MAX_DEPTH)
+    result = diff(b, probes, MAX_DEPTH, T)
     assert [p.path for p in result.changed] == [ROOT, b"a", b"n"]
     assert result.deleted == []
 
@@ -138,27 +138,27 @@ def test_diff_changed_and_new_are_stored_in_tree_order():
 def test_diff_stores_error_rows():
     b = baseline_of(probe(ROOT), probe(b"a"))
     broken = error_probe(b"a")
-    result = diff(b, [probe(ROOT, children=(b"a",)), broken], MAX_DEPTH)
+    result = diff(b, [probe(ROOT, children=(b"a",)), broken], MAX_DEPTH, T)
     assert result.changed == [broken]
     assert result.deleted == []
 
 
 def test_listed_parent_missing_a_child_tombstones_it_and_its_descendants():
     b = baseline_of(probe(b"a"), probe(b"a/b"), probe(b"a/b/c"), probe(b"a/z"))
-    result = diff(b, [probe(b"a", children=(b"z",)), probe(b"a/z")], MAX_DEPTH)
+    result = diff(b, [probe(b"a", children=(b"z",)), probe(b"a/z")], MAX_DEPTH, T)
     assert result.deleted == [b"a/b", b"a/b/c"]
     assert result.changed == []
 
 
 def test_deleted_is_in_tree_order():
     b = baseline_of(probe(ROOT), probe(b"a-c"), probe(b"a"), probe(b"a/b"), probe(b"b"))
-    result = diff(b, [probe(ROOT, rbytes=9, children=())], MAX_DEPTH)
+    result = diff(b, [probe(ROOT, rbytes=9, children=())], MAX_DEPTH, T)
     assert result.deleted == [b"a", b"a/b", b"a-c", b"b"]
 
 
 def test_open_enoent_tombstones_without_error_row():
     b = baseline_of(probe(b"a"), probe(b"a/b"))
-    result = diff(b, [error_probe(b"a", code="ENOENT")], MAX_DEPTH)
+    result = diff(b, [error_probe(b"a", code="ENOENT")], MAX_DEPTH, T)
     assert result.deleted == [b"a", b"a/b"]
     assert result.changed == []
 
@@ -166,12 +166,12 @@ def test_open_enoent_tombstones_without_error_row():
 def test_enoent_and_missing_child_report_a_path_once():
     b = baseline_of(probe(ROOT), probe(b"a"), probe(b"a/b"))
     probes = [probe(ROOT, rbytes=9, children=()), error_probe(b"a", code="ENOENT")]
-    assert diff(b, probes, MAX_DEPTH).deleted == [b"a", b"a/b"]
+    assert diff(b, probes, MAX_DEPTH, T).deleted == [b"a", b"a/b"]
 
 
 def test_enoent_without_baseline_stores_nothing():
     b = baseline_of(probe(ROOT))
-    result = diff(b, [error_probe(b"a", code="ENOENT")], MAX_DEPTH)
+    result = diff(b, [error_probe(b"a", code="ENOENT")], MAX_DEPTH, T)
     assert result.changed == []
     assert result.deleted == []
 
@@ -179,7 +179,7 @@ def test_enoent_without_baseline_stores_nothing():
 def test_non_open_enoent_is_an_ordinary_error_row():
     b = baseline_of(probe(b"a"))
     stat_gone = error_probe(b"a", Stage.STAT, "ENOENT")
-    result = diff(b, [stat_gone], MAX_DEPTH)
+    result = diff(b, [stat_gone], MAX_DEPTH, T)
     assert result.changed == [stat_gone]
     assert result.deleted == []
 
@@ -194,18 +194,18 @@ def test_non_open_enoent_is_an_ordinary_error_row():
 )
 def test_nothing_is_tombstoned_below_unlisted_directories(unlisted):
     b = baseline_of(probe(b"a"), probe(b"a/b"), probe(b"a/b/c"))
-    assert diff(b, [unlisted], MAX_DEPTH).deleted == []
+    assert diff(b, [unlisted], MAX_DEPTH, T).deleted == []
 
 
 def test_nothing_is_tombstoned_below_a_directory_at_max_depth():
     b = baseline_of(probe(b"a"), probe(b"a/b"))
-    assert diff(b, [DirProbe(b"a")], 1).deleted == []
+    assert diff(b, [DirProbe(b"a")], 1, T).deleted == []
 
 
 def test_listing_with_an_rstats_error_still_tombstones():
     b = baseline_of(probe(b"a"), probe(b"a/b"))
     listed = DirProbe(b"a", children=(), error=ProbeError(Stage.RSTATS, "EIO"))
-    result = diff(b, [listed], MAX_DEPTH)
+    result = diff(b, [listed], MAX_DEPTH, T)
     assert result.deleted == [b"a/b"]
     assert result.changed == [listed]
 
@@ -214,7 +214,7 @@ def test_recreated_path_after_tombstone_is_stored():
     # The baseline is the view, which hides tombstoned paths.
     b = baseline_of(probe(ROOT))
     back = probe(b"a")
-    result = diff(b, [probe(ROOT, rbytes=9, children=(b"a",)), back], MAX_DEPTH)
+    result = diff(b, [probe(ROOT, rbytes=9, children=(b"a",)), back], MAX_DEPTH, T)
     assert back in result.changed
 
 
@@ -227,4 +227,21 @@ def test_skipped_counts_pruned_directories_only():
         error_probe(b"errored"),
         probe(b"listed", children=()),
     ]
-    assert diff(b, probes, 2).skipped == 2
+    assert diff(b, probes, 2, T).skipped == 2
+
+
+def test_skipped_pinned_counts_pruned_directories_with_a_future_rctime():
+    at_start = (
+        (T - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 1000
+    )
+    b = baseline_of(probe(ROOT))
+    probes = [
+        DirProbe(b"pinned", rctime=at_start + 1),
+        DirProbe(b"at-start", rctime=at_start),
+        DirProbe(b"past", rctime=1000),
+        DirProbe(b"no-rstats"),
+        DirProbe(b"deep/pinned", rctime=at_start + 1),  # at max depth 2: not pruned
+        probe(b"listed", rctime=at_start + 1, children=()),
+    ]
+    result = diff(b, probes, 2, T)
+    assert (result.skipped, result.skipped_pinned) == (4, 1)

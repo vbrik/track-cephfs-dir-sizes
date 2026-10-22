@@ -87,6 +87,7 @@ class SampleResult:
     changed: int  # rows stored, tombstones excluded
     deleted: int  # tombstones stored
     skipped: int  # unchanged directories not listed: pruned subtrees
+    skipped_pinned: int  # of them, those with a pinned rctime
     errors: Counter[tuple[str, str]]  # (stage, code) -> number of directories
     walk_seconds: float
     store_seconds: float
@@ -161,7 +162,8 @@ def run_sample(
         replayed_from = str(opts.replay.resolve())
     header, baseline = walked.header, walked.baseline
     progress.phase("comparing with the baseline")
-    sample_diff = diff(baseline, walked.probes, header.max_depth)
+    started = datetime.fromisoformat(header.started)
+    sample_diff = diff(baseline, walked.probes, header.max_depth, started)
     progress.phase(
         f"storing {len(sample_diff.changed):,} directories and "
         f"{len(sample_diff.deleted):,} deletions"
@@ -180,6 +182,7 @@ def run_sample(
         changed=len(sample_diff.changed),
         deleted=len(sample_diff.deleted),
         skipped=sample_diff.skipped,
+        skipped_pinned=sample_diff.skipped_pinned,
         errors=error_counts(walked.probes),
         walk_seconds=walked.seconds,
         store_seconds=time.monotonic() - clock,
@@ -200,6 +203,11 @@ def render_sample_summary(result: SampleResult) -> str:
             f"probed {result.dirs} directories {where}; {result.changed} changed, "
             f"{result.deleted} deleted, {result.skipped} unchanged subtrees skipped"
         )
+        if result.skipped_pinned:
+            counts += (
+                f" ({result.skipped_pinned} with a pinned rctime, under which a "
+                "same-size rewrite goes unseen)"
+            )
     text = (
         f"Stored sample {result.sample_id} ({result.kind}): {counts}; "
         f"{describe_errors(result.errors)}. Walk {result.walk_seconds:.1f} s, "

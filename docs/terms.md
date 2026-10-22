@@ -12,7 +12,7 @@
 | rbytes | Total size of the files in the subtree, in bytes. |
 | rfiles, rsubdirs | Number of files and directories in the subtree; `rsubdirs` counts the directory itself. |
 | rctime | Latest change time (ctime) in the subtree, as integer nanoseconds since the epoch. |
-| pinned rctime | An rctime in the future, often `4294967295.000000000`. Because rctime is a maximum, it no longer changes when the subtree does. |
+| pinned rctime | An rctime later than the start of the sample that reads it, often `4294967295.000000000`. Because rctime is a maximum, it no longer changes when the subtree does. |
 | MDS round trip | One request to the Ceph metadata server. Every `ceph.dir.*` getxattr costs one. |
 | dirstat mode | Reading all rstats with one getxattr plus `pread()` on the directory; needs the `dirstat` mount option. |
 | getxattr mode | Reading each rstat with its own getxattr; used when the mount lacks `dirstat`. |

@@ -180,6 +180,7 @@ def result(**changes):
         "changed": 5,
         "deleted": 0,
         "skipped": 0,
+        "skipped_pinned": 0,
         "errors": Counter({("open", "EACCES"): 2}),
         "walk_seconds": 1.25,
         "store_seconds": 0.5,
@@ -213,6 +214,14 @@ def test_render_sample_summary():
         "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
         "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees "
         "skipped; none had errors. Walk 3.2 s, store 0.1 s. Replayed from /c.gz."
+    )
+    pinned = replace(incremental, skipped_pinned=12, replayed_from=None)
+    assert collapse(render_sample_summary(pinned)) == (
+        "Stored sample 7 (incremental): probed 1204 directories under "
+        "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
+        "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees skipped (12 with "
+        "a pinned rctime, under which a same-size rewrite goes unseen); none had "
+        "errors. Walk 3.2 s, store 0.1 s."
     )
 
 

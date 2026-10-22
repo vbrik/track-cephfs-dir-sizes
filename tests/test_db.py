@@ -90,7 +90,8 @@ def store(
     key = tree_key_of(header)
     if baseline is None:
         baseline = load_baseline(conn, key)
-    sample_diff = diff(baseline, probes, header.max_depth)
+    started = datetime.fromisoformat(header.started)
+    sample_diff = diff(baseline, probes, header.max_depth, started)
     return store_sample(conn, header, key, baseline, sample_diff, replayed_from)
 
 
@@ -190,7 +191,7 @@ def test_check_order():
 
 def test_store_sample_refuses_a_key_of_another_tree():
     key = tree_key_of(HEADER)
-    empty = diff(Baseline.empty(), (), HEADER.max_depth)
+    empty = diff(Baseline.empty(), (), HEADER.max_depth, T0)
     with pytest.raises(ValueError, match="not the tree of the header"):
         store_sample(
             None, HEADER, replace(key, max_depth=2), Baseline.empty(), empty, None
@@ -392,7 +393,7 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
     first_id = store(db, HEADER, [DirProbe(ROOT, rctime=1)])
     baseline = load_baseline(db, key)
     loser_header = later(HEADER, 120)
-    loser_diff = diff(baseline, [DirProbe(ROOT, rctime=3)], HEADER.max_depth)
+    loser_diff = diff(baseline, [DirProbe(ROOT, rctime=3)], HEADER.max_depth, T0)
     dsn = os.environ["TRACKDIR_TEST_DSN"]
     with connect(dsn) as rival, connect(dsn) as loser:
         loser.execute("SET default_transaction_isolation TO 'repeatable read'")
@@ -477,7 +478,7 @@ def test_awkward_values_round_trip(db):
     sample_id = store(db, HEADER, probes)
     assert read_sample(db, sample_id) == probes
     baseline = load_baseline(db, tree_key_of(HEADER))
-    assert diff(baseline, probes, HEADER.max_depth).changed == []
+    assert diff(baseline, probes, HEADER.max_depth, T0).changed == []
 
 
 def test_out_of_range_value_stores_nothing(db):

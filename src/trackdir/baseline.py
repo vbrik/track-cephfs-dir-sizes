@@ -9,7 +9,7 @@ with an empty baseline. The module is pure: no database, no filesystem.
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Self
 
 from trackdir.model import (
@@ -42,6 +42,7 @@ type Row = tuple[int | str | None, ...]
 
 _ERROR_STAGE = ROW_COLUMNS.index("error_stage")
 _OPEN_ENOENT = ProbeError(Stage.OPEN, "ENOENT")  # the directory is gone
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def row_of(probe: DirProbe) -> Row:
@@ -139,16 +140,19 @@ class SampleDiff:
 
     changed: probes to store as rows (changed, new or newly failed), in tree
     order. deleted: paths to tombstone, in tree order. skipped: directories the
-    walk pruned.
+    walk pruned; skipped_pinned: those of them with a pinned rctime.
     """
 
     changed: list[DirProbe]
     deleted: list[bytes]
     skipped: int
+    skipped_pinned: int
 
 
-def diff(baseline: Baseline, probes: Sequence[DirProbe], max_depth: int) -> SampleDiff:
-    """Compare the PROBES of a walk (in tree order) with BASELINE.
+def diff(
+    baseline: Baseline, probes: Sequence[DirProbe], max_depth: int, started: datetime
+) -> SampleDiff:
+    """Compare the PROBES of a walk (in tree order) started at STARTED with BASELINE.
 
     changed holds every probe whose row differs from its baseline row (a
     missing baseline row differs), except "open ENOENT" probes, which mean
@@ -157,16 +161,24 @@ def diff(baseline: Baseline, probes: Sequence[DirProbe], max_depth: int) -> Samp
     a baseline row, plus all baseline descendants of those. Nothing is deleted
     below a directory that was not listed. skipped counts the unlisted
     directories without an error above MAX_DEPTH: those the walk pruned.
+
+    skipped_pinned counts the pruned directories whose rctime is after STARTED.
+    Pruning them relied on the other columns alone, so it would miss a same-size
+    rewrite below. A pruned row equals the baseline's, which an earlier sample
+    stored, so a directory changed during this walk is never counted.
     """
+    pinned_after = (started - _EPOCH) // timedelta(microseconds=1) * 1000  # ns
     changed: list[DirProbe] = []
     gone: set[bytes] = set()
-    skipped = 0
+    skipped = skipped_pinned = 0
     for probe in probes:
         if probe.children is not None:
             present = {join(probe.path, name) for name in probe.children}
             gone.update(set(baseline.children.get(probe.path, ())) - present)
         elif probe.error is None and probe.depth < max_depth:
             skipped += 1
+            if probe.rctime is not None and probe.rctime > pinned_after:
+                skipped_pinned += 1
         if probe.error == _OPEN_ENOENT:
             if probe.path in baseline.rows:
                 gone.add(probe.path)
@@ -179,4 +191,4 @@ def diff(baseline: Baseline, probes: Sequence[DirProbe], max_depth: int) -> Samp
         if path not in deleted:
             deleted.add(path)
             pending.extend(baseline.children.get(path, ()))
-    return SampleDiff(changed, sorted(deleted, key=tree_key), skipped)
+    return SampleDiff(changed, sorted(deleted, key=tree_key), skipped, skipped_pinned)
