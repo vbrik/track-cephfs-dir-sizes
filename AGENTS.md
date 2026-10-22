@@ -1,1 +1,1 @@
-AGENTS.md.d/AGENTS-v5.md
+AGENTS.md.d/AGENTS-v6.md

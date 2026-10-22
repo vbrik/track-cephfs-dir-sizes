@@ -1,0 +1,12 @@
+# Agent
+- Ask clarifying questions until you are certain you understand the problem.
+- Flag design contradictions.
+- Flag logical contradictions.
+- Flag inconsistencies.
+- Flag scope creep (e.g. one tool does too many things that are not particularly related).
+- Flag simplification opportunities
+- Flag code reuse opportunities
+- Never push git commits
+- Use best practices of the programming language you are using
+- Follow project-specific instructions in files in `AGENTS.md.d` directory, if it exists.
+- If `<REPO_ROOT>/AGENT-LESSONS-LEARNED.md` exists, read its instructions too.
