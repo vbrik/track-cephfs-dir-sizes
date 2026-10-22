@@ -1,17 +1,18 @@
-"""Tests for scripts/postgres.sh, run against a stub podman (no real podman)."""
+"""Tests for scripts/postgres.py, run against a stub podman (no real podman)."""
 
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "postgres.sh"
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "postgres.py"
 BASH = shutil.which("bash") or "/usr/bin/bash"
 # The script runs with PATH limited to a directory holding the stub and links
-# to these tools, so the host's real podman can never be reached.
-HOST_TOOLS = ("cat", "fold", "rm", "sleep")
+# to the tools the stub uses, so the host's real podman can never be reached.
+HOST_TOOLS = ("cat", "rm")
 
 STUB = r"""#!@BASH@
 # Fake podman: log every call; keep container state in files in $STUB_STATE.
@@ -27,10 +28,11 @@ read_file() { cat "$state/$1" 2>/dev/null || echo; }
 case $1 in
     container)  # container inspect --format FORMAT NAME
         [[ -f $state/status ]] || { echo "Error: no such container" >&2; exit 125; }
-        case $4 in
-            *State.Status*) cat "$state/status" ;;
-            *trackdir.mode*) read_file mode ;;
-            *trackdir.port*) read_file port ;;
+        case $4 in  # exact templates, so that a malformed one fails the tests
+            '{{.State.Status}}') cat "$state/status" ;;
+            '{{index .Config.Labels "trackdir.mode"}}') read_file mode ;;
+            '{{index .Config.Labels "trackdir.port"}}') read_file port ;;
+            *) echo "stub podman: unexpected template: $4" >&2; exit 99 ;;
         esac ;;
     run)
         for arg in "$@"; do
@@ -127,7 +129,7 @@ class FakePodman:
             else:
                 environ[name] = value
         return subprocess.run(
-            [BASH, str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *args],
             env=environ,
             input=stdin,
             stdin=None if stdin is not None else subprocess.DEVNULL,
@@ -147,8 +149,10 @@ def test_help_goes_to_stdout_and_needs_no_podman(pg):
     pg.remove_stub()
     result = pg.run("--help")
     assert result.returncode == 0
-    assert "Usage: postgres.sh COMMAND" in result.stdout
-    assert "start [--ephemeral]" in result.stdout
+    assert "usage: postgres.py [-h] COMMAND" in result.stdout
+    for command in ("start", "stop", "status", "url", "psql", "reset", "destroy"):
+        assert f"\n    {command} " in result.stdout
+    assert "TRACKDIR_PG_READY_TIMEOUT" in result.stdout
     assert result.stderr == ""
 
 
@@ -156,14 +160,15 @@ def test_no_command_prints_usage_to_stderr(pg):
     result = pg.run()
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "Usage:" in result.stderr
+    assert "usage:" in result.stderr
 
 
 def test_unknown_command_is_named(pg):
     result = pg.run("frobnicate")
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert result.stdout == ""
-    assert "ERROR: unknown command 'frobnicate'" in collapse(result.stderr)
+    assert "invalid choice: 'frobnicate'" in collapse(result.stderr)
+    assert pg.calls == []
 
 
 def test_missing_podman_is_reported(pg):
@@ -290,17 +295,22 @@ def test_start_refuses_port_in_use(pg, existing):
     assert pg.called("start") == []
 
 
-@pytest.mark.parametrize(
-    "value", ["abc", "0", "70000", "5432x", "", "08080", "18446744073709551617"]
-)
+BAD_PORTS = ["abc", "0", "70000", "5432x", "", "08080", "18446744073709551617"]
+# int() accepts these: a trailing newline, a space, non-ASCII digits.
+INT_LOOKALIKES = ["5432\n", " 5432", "\u0665\u0664\u0663\u0662"]
+
+
+@pytest.mark.parametrize("value", [*BAD_PORTS, *INT_LOOKALIKES])
 def test_start_rejects_bad_port(pg, value):
     result = pg.run("start", env={"TRACKDIR_PG_PORT": value})
     assert result.returncode == 1
-    assert f"got '{value}'" in collapse(result.stderr)
+    assert f"got {value!r}" in collapse(result.stderr)
     assert pg.called("run") == []
 
 
-@pytest.mark.parametrize("value", ["soon", "", "-1", "1234567"])
+@pytest.mark.parametrize(
+    "value", ["soon", "", "-1", "1234567", "+8", " 8", "8_0", "\u0668"]
+)
 def test_start_rejects_bad_timeout(pg, value):
     result = pg.run("start", env={"TRACKDIR_PG_READY_TIMEOUT": value})
     assert result.returncode == 1
@@ -311,7 +321,6 @@ def test_start_rejects_bad_timeout(pg, value):
 def test_start_reads_timeout_with_leading_zero_as_decimal(pg):
     result = pg.run("start", env={"TRACKDIR_PG_READY_TIMEOUT": "08"})
     assert result.returncode == 0, result.stderr
-    assert "too great" not in result.stderr  # bash would read 08 as bad octal
 
 
 def test_start_fails_when_server_never_gets_ready(pg):
@@ -341,8 +350,8 @@ def test_start_removes_the_leftover_of_a_failed_run(pg):
 
 def test_start_rejects_unknown_option(pg):
     result = pg.run("start", "--fast")
-    assert result.returncode == 1
-    assert "unknown option '--fast'" in collapse(result.stderr)
+    assert result.returncode == 2
+    assert "unrecognized arguments: --fast" in collapse(result.stderr)
     assert pg.calls == []
 
 
@@ -370,8 +379,9 @@ def test_stop_without_container_is_fine(pg):
 
 def test_stop_rejects_arguments(pg):
     result = pg.run("stop", "now")
-    assert result.returncode == 1
-    assert "unexpected argument 'now'" in collapse(result.stderr)
+    assert result.returncode == 2
+    assert "unrecognized arguments: now" in collapse(result.stderr)
+    assert pg.calls == []
 
 
 def test_status_running(pg):
@@ -430,8 +440,8 @@ def test_url_reports_the_real_port_of_the_container(pg):
 def test_url_rejects_bad_port_and_option(pg):
     assert pg.run("url", env={"TRACKDIR_PG_PORT": "x"}).returncode == 1
     result = pg.run("url", "--prod")
-    assert result.returncode == 1
-    assert "unknown option '--prod'" in collapse(result.stderr)
+    assert result.returncode == 2
+    assert "unrecognized arguments: --prod" in collapse(result.stderr)
 
 
 def test_psql_passes_arguments_and_keeps_stdin(pg):
@@ -442,6 +452,27 @@ def test_psql_passes_arguments_and_keeps_stdin(pg):
     assert pg.called("exec") == [
         "exec -i trackdir-postgres psql -U trackdir -d trackdir -c select 1"
     ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--help",), ("-h", "db.example"), ("-d", "trackdir_test", "-c", "x", "-X")],
+)
+def test_psql_passes_its_options_through_in_order(pg, args):
+    pg.seed("running")
+    result = pg.run("psql", *args)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""  # not our --help
+    (call,) = pg.called("exec")
+    assert call.endswith(" -d trackdir " + " ".join(args))
+
+
+def test_psql_after_an_option_of_ours_is_a_usage_error(pg):
+    pg.seed("running")
+    result = pg.run("--bogus", "psql", "-c", "x")
+    assert result.returncode == 2
+    assert "unrecognized arguments" in collapse(result.stderr)
+    assert pg.called("exec") == []
 
 
 def test_psql_needs_a_running_server(pg):

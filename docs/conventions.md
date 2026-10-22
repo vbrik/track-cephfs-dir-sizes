@@ -31,7 +31,8 @@
 - Tests need neither Ceph nor root. Real CephFS data enters tests only as
   anonymized captures in `tests/data/`.
 - The development database is the podman container `trackdir-postgres`,
-  managed by `scripts/postgres.sh`. Database tests opt in through
+  managed by `scripts/postgres.py` (stdlib only, so it runs without the
+  venv). Database tests opt in through
   `TRACKDIR_TEST_DSN` (the `db` fixture) and are skipped without it; they
   refuse a database whose name does not end in `_test`.
   `tests/test_postgres_script.py` tests the script against a stub `podman`.

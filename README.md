@@ -97,17 +97,17 @@ out of the repository.
 
     python3 -m venv venv && venv/bin/pip install pytest 'psycopg[binary]>=3.2'
     venv/bin/python -m pytest
-    scripts/postgres.sh start            # disposable PostgreSQL in podman
-    export TRACKDIR_DB=$(scripts/postgres.sh url)
+    scripts/postgres.py start            # disposable PostgreSQL in podman
+    export TRACKDIR_DB=$(scripts/postgres.py url)
     venv/bin/trackdir db init
-    TRACKDIR_TEST_DSN=$(scripts/postgres.sh url --test) venv/bin/python -m pytest
+    TRACKDIR_TEST_DSN=$(scripts/postgres.py url --test) venv/bin/python -m pytest
     ruff format . && ruff check .
 
 Tests need neither Ceph nor root. Database tests run only when
 `TRACKDIR_TEST_DSN` is set; they wipe schema `trackdir`, so they refuse a
 database whose name does not end in `_test`.
 
-`scripts/postgres.sh help` lists the dev server's commands (`reset` and
+`scripts/postgres.py --help` lists the dev server's commands (`reset` and
 `destroy` delete its data). Any local user can connect to it, so keep real
 data out of it.
 

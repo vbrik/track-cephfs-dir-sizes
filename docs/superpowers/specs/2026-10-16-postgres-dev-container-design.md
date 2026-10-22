@@ -4,6 +4,11 @@ Date: 2026-10-16. Status: implemented. Amended after the final review: `start` o
 container still checks readiness; `psql` needs both stdin and stdout to be
 ttys; `destroy` never force-removes other containers; a failed `podman run`
 leaves no container behind; port and timeout are validated strictly.
+Amended 2026-10-22: rewritten in Python as `scripts/postgres.py` (stdlib
+only, argparse) so that it can grow without complex bash; read
+`postgres.sh` and bash below as that script. Usage errors now exit 2, the
+`help` command word is gone (use `--help`), and every argument after `psql`,
+`--help` included, goes to psql.
 
 ## 1. Purpose
 
