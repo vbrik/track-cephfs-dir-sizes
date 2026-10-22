@@ -62,7 +62,7 @@ reading them.
 ## Summarize the database
 
     trackdir db summary                  # every tree, its 10 newest samples
-    trackdir db summary --tree 3 --depth 2 --top 10
+    trackdir db summary --tree 3 --top 10
     trackdir db summary --json | jq '.trees[] | {id, current_dirs}'
 
 Example (placeholders):
@@ -75,9 +75,15 @@ Example (placeholders):
       sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
            1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
-      grew most at depth 1 since sample 1:
-        +12.0 GiB  /proj/sub/proj-a
-         +8.5 GiB  /proj/sub/proj-b
+      grew most since sample 1, by own growth:
+              own  of ROOT      total  directory
+        +12.0 GiB      58%  +12.0 GiB  /proj/sub/proj-a/run/2026 (subtree)
+         +8.1 GiB      39%   +8.5 GiB  /proj/sub/proj-b
+
+A directory's own growth is that of the files directly in it, not of its
+subdirectories, so the list points at where the growth is, at any depth.
+A directory at max depth includes everything below it and is marked
+(subtree). Growth spread thinly over many directories does not stand out.
 
 ## Capture directory state
 

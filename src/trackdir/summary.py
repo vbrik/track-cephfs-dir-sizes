@@ -21,6 +21,12 @@ from trackdir.messages import FatalError, describe_errors
 from trackdir.model import fs_absolute
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+_GROWTH_COLUMNS = (  # (header, right-aligned) of the growth table
+    ("own", True),
+    ("of ROOT", True),
+    ("total", True),
+    ("directory", False),
+)
 _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
     ("sample", True),
     ("kind", False),
@@ -36,15 +42,13 @@ _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
 )
 
 
-def run_summary(
-    dsn: str, tree_id: int | None, recent: int, top: int, depth: int
-) -> DbStats:
+def run_summary(dsn: str, tree_id: int | None, recent: int, top: int) -> DbStats:
     """Return the statistics of DSN's database; see db.summarize.
 
     Raises FatalError, also if tree TREE_ID does not exist.
     """
     with database(dsn, DB_UNCHANGED) as conn:
-        stats = summarize(conn, tree_id, recent, top, depth)
+        stats = summarize(conn, tree_id, recent, top)
     if tree_id is not None and not stats.tree_stats:
         raise FatalError(
             f"the database has no tree {tree_id}. Run trackdir db summary without "
@@ -113,27 +117,39 @@ def _tree_lines(tree: TreeStats) -> list[str]:
 
 
 def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
-    """Return a heading and a line per directory, or one line if none grew.
+    """Return a heading and a table of directories, or one line if none grew.
 
-    Directories show as absolute paths in tree KEY's filesystem.
+    Each directory shows its own growth, its share of ROOT's growth and its
+    total growth; directories show as absolute paths in tree KEY's filesystem.
     """
-    heading = f"  grew most at depth {growth.depth} since sample {growth.since}:"
+    heading = f"  grew most since sample {growth.since}, by own growth:"
     if not growth.dirs:
-        if growth.depth > key.max_depth:
-            return [f"{heading} none; the tree is sampled to depth {key.max_depth}"]
         return [f"{heading} none"]
-    sizes = [
-        _signed_bytes(d.rbytes_after - (d.rbytes_before or 0)) for d in growth.dirs
-    ]
-    width = max(map(len, sizes))
-    return [
-        heading,
-        *(
-            f"    {size:>{width}}  {display_path(fs_absolute(key.fs_path, d.path))}"
-            + (" (new)" if d.rbytes_before is None else "")
-            for size, d in zip(sizes, growth.dirs, strict=True)
-        ),
-    ]
+    rows = []
+    for d in growth.dirs:
+        flags = (("new", d.rbytes_before is None), ("subtree", d.subtree))
+        marks = [mark for mark, on in flags if on]
+        path = display_path(fs_absolute(key.fs_path, d.path))
+        rows.append(
+            [
+                _signed_bytes(d.own),
+                _share(d.own, growth.root),
+                _signed_bytes(d.rbytes_after - (d.rbytes_before or 0)),
+                path + (f" ({', '.join(marks)})" if marks else ""),
+            ]
+        )
+    return [heading, *("  " + line for line in _table(_GROWTH_COLUMNS, rows))]
+
+
+def _share(part: int, whole: int | None) -> str:
+    """Return PART as a percentage of WHOLE rounded down, "<1%" if below 1.
+
+    Without a positive WHOLE, the share is meaningless: return "-".
+    """
+    if whole is None or whole <= 0:
+        return "-"
+    percent = part * 100 // whole
+    return f"{percent}%" if percent else "<1%"
 
 
 def _root_lines(now: RootTotals | None, first: RootTotals | None) -> list[str]:

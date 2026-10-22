@@ -240,24 +240,32 @@ class SampleStats:
 
 @dataclass(frozen=True, slots=True)
 class DirGrowth:
-    """A directory's rbytes at the start and the end of a growth window."""
+    """A directory's rbytes at the start and the end of a growth window.
+
+    Its own growth is its rbytes growth minus that of the directories below it
+    that get their own: the growth of its files, not its subdirectories'.
+    """
 
     path: bytes
     rbytes_before: int | None  # None: the directory is new in the window
     rbytes_after: int
+    own: int
+    # own may hold subdirectories' growth: those below max depth, below an
+    # unlisted directory, or without a known growth of their own
+    subtree: bool
 
 
 @dataclass(frozen=True, slots=True)
 class Growth:
-    """The directories at one depth whose rbytes grew the most since a sample.
+    """The directories whose own growth was the greatest since a sample.
 
     The window runs from sample SINCE to the tree's latest sample. Directories
     without rstats at either end, and those gone by the end, are left out.
     """
 
     since: int
-    depth: int
-    dirs: tuple[DirGrowth, ...]  # most growth first, ties by path
+    root: int | None  # ROOT's rbytes growth; None without rstats at either end
+    dirs: tuple[DirGrowth, ...]  # most own growth first, ties by path
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,18 +501,16 @@ def summarize(
     tree_id: int | None = None,
     recent: int = 10,
     top: int = 3,
-    depth: int = 1,
 ) -> DbStats:
     """Return the database's statistics, with those of tree TREE_ID or all trees.
 
     An unknown TREE_ID gives no tree statistics. Each tree lists its RECENT
-    newest samples, and the TOP directories at DEPTH (>= 1) that grew the most
-    since its first sample, given 2 samples, and since its second-to-last, given
-    3; TOP 0 skips growth. Telling new rows from modified ones, and so a
-    sample's kind, sorts every dir_state row of the trees; so does each growth
-    window, for the rows at DEPTH. One READ ONLY REPEATABLE READ transaction
-    keeps all numbers consistent. Raises SchemaMissing or SchemaVersionMismatch
-    unless the schema is current.
+    newest samples, and the TOP directories with the most own growth since its
+    first sample, given 2 samples, and since its second-to-last, given 3; TOP 0
+    skips growth. Telling new rows from modified ones, and so a sample's kind,
+    sorts every dir_state row of the trees; so does each growth window. One
+    READ ONLY REPEATABLE READ transaction keeps all numbers consistent. Raises
+    SchemaMissing or SchemaVersionMismatch unless the schema is current.
     """
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -515,9 +521,13 @@ def summarize(
         samples = _group(cur.execute(_SAMPLES, params))
         roots = _group(cur.execute(_ROOT_ROWS, {**params, "root": ROOT}))
         errors = _group(cur.execute(_CURRENT_ERRORS, params))
+        # A small sample table may never be analyzed, and then the planner
+        # takes each growth CTE for a few rows and joins them in nested loops:
+        # minutes instead of seconds for 200000 directories.
+        cur.execute("SET LOCAL enable_nestloop = off")
         growth = {
-            tree_id: _growth(cur, tree_id, samples.get(tree_id, []), top, depth)
-            for tree_id, *_ in trees
+            tree_id: _growth(cur, tree_id, max_depth, samples.get(tree_id, []), top)
+            for tree_id, *_, max_depth in trees
         }
     tree_stats = tuple(
         _tree_stats(
@@ -582,54 +592,113 @@ WHERE error_stage IS NOT NULL AND {_IN_TREE.format(column="tree_id")}
 GROUP BY tree_id, error_stage, error_code
 """
 
-# The %(top)s directories at depth %(depth)s of tree %(tree)s whose rbytes grew
-# the most from sample %(since)s, started at %(started)s, to the latest sample;
-# most first, ties by path. A path's state at a sample is its latest row up to
-# it, in the view's order. A path absent or tombstoned at the start is new and
-# grows from 0, but only if its nearest ancestor present at the start was
+# ROOT's rbytes growth in tree %(tree)s from sample %(since)s, started at
+# %(started)s, to the latest sample, and the %(top)s directories with the most
+# own growth in it, most first, ties by path; no directory gives one row of
+# NULLs. A path's state at a sample is its latest row up to it, in the view's
+# order; a path is present if that row is no tombstone. A path present at the
+# end grows by its rbytes then minus its rbytes at the start; one absent at the
+# start grows from 0, but only if its nearest ancestor present at the start was
 # listed (no error, or rstats only, as in capture.is_listed): below an unlisted
-# one it may have existed unseen. Depth counts the "/" of the escaped path:
-# escaping changes only backslashes and bytes outside printable ASCII.
+# one it may have existed unseen. A path gone by the end grows by minus its
+# rbytes at the start. Without rstats, growth is unknown. A path's own growth
+# is its growth minus that of each path whose nearest ancestor with a known
+# growth it is; such a path with an unknown growth makes it a subtree, as does
+# being unlisted at the end. Ancestors are found by prefix in the escaped path:
+# escaping changes only backslashes and bytes outside printable ASCII. Only
+# paths flagged as new, or with a parent that may lack a known growth, look
+# past their parent: listing every path's ancestors would cost seconds.
 _GROWTH = """WITH history AS (
-    SELECT d.path, d.rbytes, d.error_stage, d.deleted, s.started, s.id,
-           CASE WHEN d.path = %(root)s THEN 0
-                ELSE length(encode(d.path, 'escape'))
-                     - length(replace(encode(d.path, 'escape'), '/', '')) + 1
-           END AS depth
+    SELECT d.path, d.rbytes, d.error_stage, d.deleted, s.started, s.id
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
     WHERE s.tree_id = %(tree)s
 ), before AS (
-    SELECT DISTINCT ON (path) path, depth, rbytes, error_stage, deleted
-    FROM history
-    WHERE depth <= %(depth)s AND (started, id) <= (%(started)s, %(since)s)
+    SELECT DISTINCT ON (path) path, rbytes, error_stage, deleted FROM history
+    WHERE (started, id) <= (%(started)s, %(since)s)
     ORDER BY path, started DESC, id DESC
 ), after AS (
-    SELECT DISTINCT ON (path) path, rbytes, deleted FROM history
-    WHERE depth = %(depth)s
+    SELECT DISTINCT ON (path) path, rbytes, error_stage, deleted FROM history
     ORDER BY path, started DESC, id DESC
+), dirs AS (
+    SELECT path, encode(path, 'escape') AS epath,
+           b.path IS NOT NULL AS was, b.rbytes AS rbytes_before,
+           b.error_stage AS error_before,
+           a.path IS NOT NULL AS alive, a.rbytes AS rbytes_after,
+           a.error_stage AS error_after
+    FROM (SELECT * FROM after WHERE NOT deleted) a
+    FULL JOIN (SELECT * FROM before WHERE NOT deleted) b USING (path)
+), parented AS (
+    SELECT *, CASE WHEN path = %(root)s THEN NULL
+                   WHEN position('/' IN epath) = 0 THEN '.'
+                   ELSE regexp_replace(epath, '/[^/]*$', '')
+              END AS parent
+    FROM dirs
+), flagged AS (
+    SELECT d.epath FROM parented d LEFT JOIN dirs p ON p.epath = d.parent
+    WHERE d.parent IS NOT NULL
+      AND (p.epath IS NULL OR NOT p.was OR NOT d.was
+           OR p.rbytes_before IS NULL OR p.alive AND p.rbytes_after IS NULL)
+), ancestry AS (
+    SELECT f.epath,
+           CASE WHEN n = 0 THEN '.' ELSE array_to_string(part[1:n], '/') END
+               AS ancestor,
+           n AS depth
+    FROM flagged f, string_to_array(f.epath, '/') part,
+         generate_series(0, cardinality(part) - 1) n
+), unseen AS (
+    SELECT DISTINCT ON (an.epath) an.epath,
+           p.error_before IN ('open', 'stat', 'readdir') AS unseen
+    FROM dirs d JOIN ancestry an ON an.epath = d.epath
+    JOIN dirs p ON p.epath = an.ancestor AND p.was
+    WHERE d.alive AND NOT d.was
+    ORDER BY an.epath, an.depth DESC
+), delta AS (
+    SELECT d.*,
+           CASE WHEN NOT d.alive THEN -d.rbytes_before
+                WHEN d.was THEN d.rbytes_after - d.rbytes_before
+                WHEN u.unseen IS NOT TRUE THEN d.rbytes_after
+           END AS grew
+    FROM parented d LEFT JOIN unseen u USING (epath)
+), owner AS (
+    SELECT d.epath, d.parent AS ancestor FROM delta d
+    WHERE d.parent IS NOT NULL
+      AND NOT EXISTS (SELECT FROM flagged f WHERE f.epath = d.epath)
+    UNION ALL (
+        SELECT DISTINCT ON (an.epath) an.epath, an.ancestor
+        FROM ancestry an
+        JOIN delta v ON v.epath = an.ancestor AND v.grew IS NOT NULL
+        ORDER BY an.epath, an.depth DESC
+    )
+), absorbed AS (
+    SELECT o.ancestor AS epath, sum(d.grew)::bigint AS below,
+           bool_or(d.grew IS NULL) AS unknown
+    FROM owner o JOIN delta d USING (epath)
+    GROUP BY o.ancestor
 )
-SELECT a.path, b.rbytes, a.rbytes
-FROM after a LEFT JOIN before b ON b.path = a.path AND NOT b.deleted
-WHERE NOT a.deleted AND a.rbytes IS NOT NULL
-  AND (b.path IS NULL OR b.rbytes IS NOT NULL)
-  AND a.rbytes > coalesce(b.rbytes, 0)
-  AND (b.path IS NOT NULL OR NOT EXISTS (
-      SELECT FROM (
-          SELECT p.error_stage FROM before p
-          WHERE NOT p.deleted AND p.depth < %(depth)s
-            AND (p.path = %(root)s
-                 OR substring(a.path FOR length(p.path) + 1) = p.path || '/'::bytea)
-          ORDER BY p.depth DESC LIMIT 1
-      ) nearest
-      WHERE nearest.error_stage IN ('open', 'stat', 'readdir')
-  ))
-ORDER BY a.rbytes - coalesce(b.rbytes, 0) DESC, a.path
-LIMIT %(top)s
+SELECT (SELECT grew FROM delta WHERE path = %(root)s), r.*
+FROM (VALUES (1)) one LEFT JOIN LATERAL (
+    SELECT d.path, CASE WHEN d.was THEN d.rbytes_before END, d.rbytes_after,
+           d.grew - coalesce(a.below, 0) AS own,
+           coalesce(a.unknown, false)
+           OR coalesce(d.error_after IN ('open', 'stat', 'readdir'), false)
+           OR CASE WHEN d.parent IS NULL THEN 0
+                   ELSE cardinality(string_to_array(d.epath, '/'))
+              END >= %(max_depth)s
+    FROM delta d LEFT JOIN absorbed a USING (epath)
+    WHERE d.alive AND d.grew - coalesce(a.below, 0) > 0
+    ORDER BY own DESC, d.path
+    LIMIT %(top)s
+) r ON true
+ORDER BY r.own DESC, r.path
 """
 
 
 def _growth(
-    cur: "psycopg.Cursor", tree_id: int, samples: list[tuple], top: int, depth: int
+    cur: "psycopg.Cursor",
+    tree_id: int,
+    max_depth: int,
+    samples: list[tuple],
+    top: int,
 ) -> tuple[Growth, ...]:
     """Return tree TREE_ID's growth windows; see summarize.
 
@@ -645,13 +714,14 @@ def _growth(
         params = {
             "tree": tree_id,
             "root": ROOT,
-            "depth": depth,
+            "max_depth": max_depth,
             "since": since,
             "started": started,
             "top": top,
         }
-        dirs = tuple(DirGrowth(*row) for row in cur.execute(_GROWTH, params))
-        windows.append(Growth(since, depth, dirs))
+        rows = cur.execute(_GROWTH, params).fetchall()
+        dirs = tuple(DirGrowth(*row[1:]) for row in rows if row[1] is not None)
+        windows.append(Growth(since, rows[0][0], dirs))
     return tuple(windows)
 
 

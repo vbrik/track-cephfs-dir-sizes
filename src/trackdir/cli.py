@@ -102,7 +102,7 @@ DB_SUMMARY_DESCRIPTION = f"""\
 Report what the database given by --db or {dbcli.DSN_ENV} holds: totals, then
 for each tree its samples, its current directories and errors, ROOT's size and
 its change since the first sample, the newest samples with what each stored,
-and the directories at --depth whose rbytes grew the most since the first
+and the directories, at any depth, with the most own growth since the first
 sample and since the second-to-last. Read-only; the report goes to stdout.
 """
 
@@ -113,10 +113,21 @@ before the sample, else modified; deleted counts its tombstones. Telling them
 apart reads every stored row of the trees reported.
 
 Growth since the first sample needs 2 samples, since the second-to-last 3;
-both windows end at the latest sample. A directory new in a window grows from 0 and is
-marked (new), unless its nearest ancestor at the start was not listed (an
-error other than rstats), so it may have existed unseen; then it is left out,
-as is one without rstats at either end, or gone by the end. --top 0 skips growth.
+both windows end at the latest sample. A directory's growth is that of its
+rbytes; its own growth is that minus the growth of its subdirectories: the
+growth of the files directly in it. Own growths add up to ROOT's growth, so
+none is counted twice; "of ROOT" is that share. A directory below max depth
+is not stored, so its growth shows in its ancestor at max depth, whose own
+growth is then its subtree's; so does that of a subdirectory of an unlisted
+directory (an error other than rstats) or of one without rstats at either
+end. Such a directory is marked (subtree): its growth is somewhere below it.
+Growth spread over many subdirectories, each growing a little, makes none
+of them rank, and does not rank their parent either.
+
+A directory new in a window grows from 0 and is marked (new), unless its
+nearest ancestor at the start was not listed, so it may have existed unseen;
+then its growth is unknown. A directory with an unknown growth, or gone by
+the end, is left out. --top 0 skips growth.
 
 {_exit_status(dbcli.DB_UNCHANGED)}"""
 
@@ -293,7 +304,7 @@ def _prepare_db_summary(args: argparse.Namespace) -> _Command:
     render = summary.render_json if args.json else summary.render_text
 
     def run() -> str:
-        stats = summary.run_summary(dsn, args.tree, args.samples, args.top, args.depth)
+        stats = summary.run_summary(dsn, args.tree, args.samples, args.top)
         sys.stdout.write(render(stats))
         return ""
 
@@ -526,14 +537,7 @@ def _parser() -> argparse.ArgumentParser:
         type=_int_between(0, MAX_DIRS_LIMIT),
         default=3,
         metavar="N",
-        help="list the N directories that grew the most (default: %(default)s)",
-    )
-    summarize.add_argument(
-        "--depth",
-        type=_int_between(1, MAX_DEPTH_LIMIT),
-        default=1,
-        metavar="N",
-        help="rank directories at depth N below ROOT (default: %(default)s)",
+        help="list the N directories with the most own growth (default: %(default)s)",
     )
     summarize.add_argument(
         "--json", action="store_true", help="print JSON instead of text"
