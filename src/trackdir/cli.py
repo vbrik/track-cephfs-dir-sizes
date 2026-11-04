@@ -1,19 +1,19 @@
-"""Command-line interface: trackdir capture, sample, db init and db summary."""
+"""Command-line interface: trackdir capture, sample, daemon, db init and db summary."""
 
 import argparse
-import contextlib
 import os
 import signal
 import stat
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from trackdir import __version__, dbcli, sample, summary
+from trackdir import __version__, daemon, dbcli, sample, summary
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
+from trackdir.interrupts import Terminated, terminate_on_signals
 from trackdir.live import (
     DEFAULT_JOBS,
     DEFAULT_MAX_DIRS,
@@ -90,6 +90,45 @@ postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass
 or PGPASSWORD, never in --db: ps shows command lines to every local user.
 
 {_exit_status(dbcli.NOTHING_STORED, "per-directory errors included")}"""
+
+DAEMON_DESCRIPTION = f"""\
+Sample the trees listed in the config file FILE once per interval, as
+trackdir sample would, until stopped. Each cycle samples every tree in config
+order. The daemon logs one line per event to stdout, prefixed with the UTC
+time and the level; other commands do not read the config file.
+
+Read-only on every tree's root; writes to the database given by db or
+{dbcli.DSN_ENV}.
+The database schema must exist: run `trackdir db init` once.
+"""
+
+DAEMON_EPILOG = f"""\
+FILE is TOML. interval, at least one [[tree]], and each tree's root and
+max_depth are required; the other keys are shown with their defaults:
+  interval = "6h"             # <integer><unit>, unit s, m, h or d
+  db = "postgresql://trackdir@db.example.org/trackdir"   # default: ${dbcli.DSN_ENV}
+  log_level = "INFO"          # DEBUG, INFO, WARNING or ERROR
+  [[tree]]                    # one per tree, sampled in this order
+  root = "/mnt/cephfs/projects"
+  max_depth = 4
+  max_dirs = {DEFAULT_MAX_DIRS}
+  jobs = {DEFAULT_JOBS}
+
+Cycles start one interval apart. The first starts one interval after the
+oldest of the trees' latest samples, or at once if a tree has none, so a
+restart adds no sample. A cycle still running when the next is due is an
+overrun: the sample in progress is aborted and stores nothing (samples the
+cycle already stored stay), and the daemon exits.
+
+Per-directory errors are stored and counted, as by trackdir sample. Any other
+error is logged and stops the daemon, so run it under a service manager that
+does not restart it: the stopped service is the alarm. A trackdir sample of
+one of the trees while the daemon samples it can be such an error: whichever
+of the two stores second fails.
+
+Exit status: 0 stopped by SIGTERM, SIGHUP or SIGINT, 1 error (including an
+overrun), 2 usage error. A stop aborts the sample in progress, which stores
+nothing."""
 
 DB_INIT_DESCRIPTION = f"""\
 Create trackdir's tables in the database given by --db or {dbcli.DSN_ENV}.
@@ -170,14 +209,6 @@ class _Command:
     unchanged: str  # what an interrupted run leaves, e.g. "nothing was stored"
 
 
-class _Terminated(BaseException):
-    """A termination signal arrived; unwinding cleans up (temp file, transaction)."""
-
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
-
-
 def run_capture(
     opts: CaptureOptions,
     warn: Callable[[str], None],
@@ -230,9 +261,11 @@ def render_summary(result: CaptureResult) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the trackdir command line and return the exit status."""
     args = _parser().parse_args(argv)
+    if (own := getattr(args, "main", None)) is not None:
+        return own(args)  # owns its logging, signals and exit status
     command = args.prepare(args)
     try:
-        with _terminate_on_signals():
+        with terminate_on_signals():
             message = command.run()
     except FatalError as e:
         sys.stderr.write(paragraph(f"ERROR: {e}"))
@@ -240,7 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         sys.stderr.write(paragraph(f"ERROR: interrupted; {command.unchanged}."))
         return 130
-    except _Terminated as e:
+    except Terminated as e:
         name = signal.Signals(e.signum).name
         sys.stderr.write(paragraph(f"ERROR: {name} received; {command.unchanged}."))
         return 128 + e.signum
@@ -324,27 +357,6 @@ def _dsn(args: argparse.Namespace) -> str:
     if not dsn:
         args.parser.error(f"no database given: pass --db DSN or set {dbcli.DSN_ENV}")
     return dsn
-
-
-@contextlib.contextmanager
-def _terminate_on_signals() -> Iterator[None]:
-    """Turn SIGTERM and SIGHUP into _Terminated while the body runs.
-
-    Their default action kills the process without unwinding, which would
-    leave capture's hidden temp file behind (timeout, systemd, a dropped ssh
-    session).
-    """
-
-    def handler(signum: int, frame: object) -> None:
-        raise _Terminated(signum)
-
-    signums = (signal.SIGTERM, signal.SIGHUP)
-    previous = {signum: signal.signal(signum, handler) for signum in signums}
-    try:
-        yield
-    finally:
-        for signum, action in previous.items():
-            signal.signal(signum, action)
 
 
 def _check_output(output: Path, root: Path) -> None:
@@ -501,6 +513,22 @@ def _parser() -> argparse.ArgumentParser:
     _add_max_dirs(sample_parser)
     _add_jobs(sample_parser)
     _add_db(sample_parser)
+
+    daemon_parser = commands.add_parser(
+        "daemon",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="sample the trees of a config file once per interval",
+        description=DAEMON_DESCRIPTION,
+        epilog=DAEMON_EPILOG,
+    )
+    daemon_parser.set_defaults(main=lambda args: daemon.run(args.config))
+    daemon_parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="TOML file with the interval and the trees",
+    )
 
     db = commands.add_parser(
         "db",

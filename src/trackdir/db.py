@@ -430,6 +430,22 @@ def load_baseline(conn: "psycopg.Connection", key: TreeKey) -> Baseline:
     return Baseline.build(sample_id, started, rows)
 
 
+def latest_started(conn: "psycopg.Connection", key: TreeKey) -> datetime | None:
+    """Return when tree KEY's latest sample started; None without samples.
+
+    The latest sample is the one with the greatest (started, id), as in the
+    baseline. Unlike load_baseline, this reads no dir_state rows.
+    """
+    with _db_errors(), conn.cursor() as cur:
+        tree = cur.execute(
+            f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH}", _key_params(key)
+        ).fetchone()
+        if tree is None:
+            return None
+        latest = cur.execute(_LATEST_SAMPLE, tree).fetchone()
+    return None if latest is None else latest[1]
+
+
 def store_sample(
     conn: "psycopg.Connection",
     header: CaptureHeader,

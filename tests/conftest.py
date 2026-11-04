@@ -1,5 +1,6 @@
 import io
 import os
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -9,6 +10,7 @@ import pytest
 
 from trackdir import live
 from trackdir.capture import Capture, is_listed, load_capture, write_capture
+from trackdir.db import TreeKey
 from trackdir.model import ROOT, DirProbe, RStats, path_depth, split, tree_key
 from trackdir.mount import CephMount
 from trackdir.rstats import RStatMode
@@ -237,3 +239,24 @@ def later(capture: Capture, hours: float = 1) -> str:
     """Return the start time HOURS after CAPTURE's."""
     started = datetime.fromisoformat(capture.header.started)
     return (started + timedelta(hours=hours)).isoformat()
+
+
+def sample_result(**changes) -> SampleResult:
+    """Return a SampleResult with placeholder values, CHANGES applied."""
+    fields = {
+        "sample_id": 7,
+        "root": "/mnt/cephfs/x",
+        "tree": TreeKey("fsid", None, b"/x", 2),
+        "max_depth": 2,
+        "dirs": 5,
+        "changed": 5,
+        "deleted": 0,
+        "skipped": 0,
+        "skipped_pinned": 0,
+        "errors": Counter({("open", "EACCES"): 2}),
+        "walk_seconds": 1.25,
+        "store_seconds": 0.5,
+        "replayed_from": None,
+        "kind": "initial",
+    }
+    return SampleResult(**(fields | changes))

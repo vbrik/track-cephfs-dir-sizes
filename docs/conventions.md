@@ -24,6 +24,16 @@
   on exit from its `with` block, and by the warn callback (`cli._warner`).
   Anything else that writes to stderr during a run calls `Progress.clear()`
   first.
+- `trackdir daemon` writes no messages: it has no results and logs to
+  stdout instead, one line per event (`YYYY-MM-DDTHH:MM:SSZ LEVEL message`,
+  UTC) through a handler on the root logger, so library records share the
+  stream; no progress line. Message text is shared with the other commands:
+  a one-line `describe_*` function gives the text, and a manual command wraps
+  it with `paragraph`.
+- Signals become exceptions derived from BaseException (`interrupts.py`), so
+  a run unwinds and cleans up: `walker.walk` cancels pending probes, a
+  transaction rolls back. Code that catches them re-raises them or decides
+  the exit status (`cli.main`, `daemon.run`).
 - `walk_within` alone enforces the depth limit: no directory at max depth is
   listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);

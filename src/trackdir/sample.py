@@ -193,6 +193,11 @@ def run_sample(
 
 def render_sample_summary(result: SampleResult) -> str:
     """Return the success message for RESULT as one wrapped paragraph."""
+    return paragraph(describe_sample(result))
+
+
+def describe_sample(result: SampleResult) -> str:
+    """Return the success message for RESULT as one line, without a newline."""
     where = (
         f"under {result.root} to depth {result.max_depth}, {describe_tree(result.tree)}"
     )
@@ -215,7 +220,7 @@ def render_sample_summary(result: SampleResult) -> str:
     )
     if result.replayed_from is not None:
         text += f" Replayed from {result.replayed_from}."
-    return paragraph(text)
+    return text
 
 
 def run_db_init(dsn: str) -> bool:

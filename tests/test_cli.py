@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import Terminal, collapse, must_not_walk, status_phases
 
-from trackdir import cli, live
+from trackdir import cli, daemon, live
 from trackdir.anonymize import key_recipe
 from trackdir.capture import load_capture
 from trackdir.cli import (
@@ -374,3 +374,40 @@ def test_warning_erases_the_progress_line_first(monkeypatch):
     progress.phase("loading the baseline")
     cli._warner(progress)("slow")
     assert stderr.getvalue() == "\rloading the baseline\x1b[K\r\x1b[KWARNING: slow\n"
+
+
+def test_daemon_requires_config(capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["daemon"])
+    assert raised.value.code == 2
+    assert "--config" in capsys.readouterr().err
+
+
+def test_daemon_runs_with_its_own_status(monkeypatch):
+    calls = []
+
+    def run(config_path):
+        calls.append(config_path)
+        return 0
+
+    monkeypatch.setattr(daemon, "run", run)
+    assert main(["daemon", "--config", "c.toml"]) == 0
+    assert calls == [Path("c.toml")]
+
+
+def test_daemon_help(capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["daemon", "--help"])
+    assert raised.value.code == 0
+    text = collapse(capsys.readouterr().out)
+    for words in (
+        "interval",
+        "[[tree]]",
+        "max_depth",
+        "log_level",
+        "stdout",
+        "0 stopped by SIGTERM, SIGHUP or SIGINT",
+        "1 error",
+        "overrun",
+    ):
+        assert words in text

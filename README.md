@@ -7,6 +7,7 @@ subtree costs one metadata request instead of a full scan, and a repeated
 sample reads only the subtrees that changed.
 
 - `trackdir sample` stores a sample of a directory tree in the database.
+- `trackdir daemon` samples the trees of a config file once per interval.
 - `trackdir db summary` reports what the database holds, including the
   directories that grew the most.
 - `trackdir capture` records a tree into a file, for offline debugging and
@@ -59,6 +60,49 @@ reading them.
 - A rename is recorded as a deletion plus a creation.
 - The previous state is held in memory: about 0.5 GB, and up to 1.6 GB while
   loading, per million directories.
+
+## Run as a daemon
+
+    trackdir daemon --config /etc/trackdir.toml
+
+The config file lists the trees and the interval; `trackdir daemon --help`
+lists every key:
+
+    interval = "6h"
+    db = "postgresql://trackdir@db.example.org/trackdir"   # default: $TRACKDIR_DB
+
+    [[tree]]
+    root = "/mnt/cephfs/projects"
+    max_depth = 3
+
+    [[tree]]
+    root = "/mnt/cephfs/home"
+    max_depth = 2
+
+Every interval the daemon samples each tree in turn, and logs one line per
+event to stdout. After a restart it waits for the next due cycle, judged by
+the samples in the database.
+
+Per-directory errors are stored as usual. Any other error, including a cycle
+that runs past the next one's start, is logged and **stops the daemon** with
+status 1, so the stopped service is the alarm. Run it without automatic
+restarts, e.g. with systemd:
+
+    [Service]
+    Type=simple
+    User=root
+    ExecStart=/opt/trackdir/venv/bin/trackdir daemon --config /etc/trackdir.toml
+
+    [Install]
+    WantedBy=multi-user.target
+
+and watch for failed units (`systemctl --failed`, or `OnFailure=` to send
+mail). A manual `trackdir sample` of one of the daemon's trees while the
+daemon samples it can stop the daemon (whichever stores second fails); one
+between cycles is harmless.
+
+The daemon samples one tree at a time, but may keep the memory of its largest
+sample between cycles.
 
 ## Summarize the database
 
@@ -130,3 +174,4 @@ on an address other than loopback needs `--password` (or `TRACKDIR_PG_PASSWORD`)
 - [Design of capture](docs/superpowers/specs/2026-10-15-trackdir-capture-design.md).
 - [Design of the initial sample](docs/superpowers/specs/2026-10-16-trackdir-initial-sample-design.md).
 - [Design of incremental samples](docs/superpowers/specs/2026-10-16-trackdir-incremental-sample-design.md).
+- [Design of the daemon](docs/superpowers/specs/2026-11-04-trackdir-daemon-design.md).

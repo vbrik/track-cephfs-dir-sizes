@@ -6,7 +6,14 @@ from dataclasses import replace
 from datetime import datetime
 
 import pytest
-from conftest import SUBTREE, Terminal, collapse, must_not_walk, status_phases
+from conftest import (
+    SUBTREE,
+    Terminal,
+    collapse,
+    must_not_walk,
+    sample_result,
+    status_phases,
+)
 
 from trackdir import dbcli, live, sample
 from trackdir.cli import main
@@ -19,12 +26,12 @@ from trackdir.db import (
     tree_key_of,
 )
 from trackdir.dbcli import describe_tree
-from trackdir.messages import FatalError
+from trackdir.messages import FatalError, paragraph
 from trackdir.model import ROOT, error_counts
 from trackdir.progress import Progress
 from trackdir.sample import (
     SampleOptions,
-    SampleResult,
+    describe_sample,
     render_sample_summary,
     replay_walk,
     run_sample,
@@ -170,33 +177,13 @@ def test_replay_of_bad_capture_fails(tmp_path, capsys, content, detail):
     assert err.count(str(path)) == 1
 
 
-def result(**changes):
-    fields = {
-        "sample_id": 7,
-        "root": "/mnt/cephfs/x",
-        "tree": TreeKey("fsid", None, b"/x", 2),
-        "max_depth": 2,
-        "dirs": 5,
-        "changed": 5,
-        "deleted": 0,
-        "skipped": 0,
-        "skipped_pinned": 0,
-        "errors": Counter({("open", "EACCES"): 2}),
-        "walk_seconds": 1.25,
-        "store_seconds": 0.5,
-        "replayed_from": None,
-        "kind": "initial",
-    }
-    return SampleResult(**(fields | changes))
-
-
 def test_render_sample_summary():
-    assert collapse(render_sample_summary(result())) == (
+    assert collapse(render_sample_summary(sample_result())) == (
         "Stored sample 7 (initial): 5 directories under /mnt/cephfs/x to depth 2, "
         "tree (cluster fsid, default filesystem, path /x, depth 2); "
         "2 had errors: open EACCES 2. Walk 1.2 s, store 0.5 s."
     )
-    incremental = result(
+    incremental = sample_result(
         tree=TreeKey("fsid", "cephfs", b"/x", 4),
         max_depth=4,
         dirs=1204,
@@ -223,6 +210,17 @@ def test_render_sample_summary():
         "a pinned rctime, under which a same-size rewrite goes unseen); none had "
         "errors. Walk 3.2 s, store 0.1 s."
     )
+
+
+def test_describe_sample_is_one_line():
+    incremental = sample_result(
+        dirs=1204, changed=18, skipped=31, skipped_pinned=12, kind="incremental"
+    )
+    replayed = sample_result(replayed_from="/c.gz")
+    for result in (sample_result(), incremental, replayed):
+        text = describe_sample(result)
+        assert "\n" not in text
+        assert render_sample_summary(result) == paragraph(text)
 
 
 def test_describe_tree_includes_depth():
@@ -265,7 +263,7 @@ def test_conflicts_name_the_tree_as_the_summary_does(
         run_sample(SampleOptions(dsn="x", replay=SUBTREE), print)
     tree = describe_tree(key)
     assert collapse(str(exc.value)) == text.format(tree=tree)
-    assert tree in collapse(render_sample_summary(result(tree=key)))
+    assert tree in collapse(render_sample_summary(sample_result(tree=key)))
 
 
 def fail_to_connect(error):

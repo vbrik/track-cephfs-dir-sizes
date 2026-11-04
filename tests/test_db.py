@@ -29,6 +29,7 @@ from trackdir.db import (
     connect,
     dir_state_row,
     init_schema,
+    latest_started,
     load_baseline,
     store_sample,
     tree_key_of,
@@ -274,6 +275,22 @@ def test_load_baseline_empty_for_unknown_tree_and_for_tree_without_samples(db):
         (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
     )
     assert load_baseline(db, key) == Baseline.empty()
+
+
+def test_latest_started(db):
+    init_schema(db)
+    key = tree_key_of(HEADER)
+    assert latest_started(db, key) is None
+    db.execute(
+        "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
+        " VALUES (%s, %s, %s, %s)",
+        (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
+    )
+    assert latest_started(db, key) is None
+    store(db, HEADER)
+    store(db, later(HEADER, 60))
+    assert latest_started(db, key) == T0 + timedelta(seconds=60)
+    assert latest_started(db, tree_key_of(replace(HEADER, max_depth=3))) is None
 
 
 # A tree to depth 2 (ROOT, a, a/b) and its second sample, which changes a and
