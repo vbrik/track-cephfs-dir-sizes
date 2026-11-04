@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import NoReturn, Protocol, TextIO
 
 from trackdir import __version__
 from trackdir.config import DaemonConfig, Interval, TreeConfig, load
@@ -28,6 +28,7 @@ from trackdir.dbcli import DB_UNCHANGED, database, describe_tree
 from trackdir.interrupts import Overrun, Terminated, deadline, terminate_on_signals
 from trackdir.live import open_live_root
 from trackdir.messages import FatalError
+from trackdir.progress import LogProgress, Progress
 from trackdir.sample import SampleOptions, SampleResult, describe_sample, run_sample
 
 LOGGER_NAME = "trackdir"
@@ -36,8 +37,22 @@ LOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"  # with time.gmtime: UTC
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 # Shortest deadline armed for a cycle; setitimer(0) would mean "never".
 _MIN_DEADLINE = 1e-3
+# Seconds between DEBUG lines with the counts of a tree's walk.
+PROGRESS_INTERVAL = 300.0
 
-type Sampler = Callable[[SampleOptions, Callable[[str], None]], SampleResult]
+
+class Sampler(Protocol):
+    """Stores a sample, as run_sample does."""
+
+    def __call__(
+        self,
+        opts: SampleOptions,
+        warn: Callable[[str], None],
+        *,
+        progress: Progress,
+    ) -> SampleResult: ...
+
+
 type Inspector = Callable[
     [DaemonConfig, Callable[[str], None]], tuple[datetime | None, ...]
 ]
@@ -154,7 +169,9 @@ def run_cycles(
         sleep(max(0.0, scheduled - clock()))
         start = max(scheduled, clock())
         scheduled = start + config.interval.seconds
-        _cycle(config, log, warn, sample, max(scheduled - clock(), _MIN_DEADLINE))
+        _cycle(
+            config, log, warn, sample, clock, max(scheduled - clock(), _MIN_DEADLINE)
+        )
         log.info(
             "cycle finished in %.1f s; next cycle at %s",
             clock() - start,
@@ -221,6 +238,7 @@ def _cycle(
     log: logging.Logger,
     warn: Callable[[str], None],
     sample: Sampler,
+    clock: Callable[[], float],
     seconds: float,
 ) -> None:
     """Sample every tree in config order; raise Overrun as FatalError after SECONDS."""
@@ -229,7 +247,7 @@ def _cycle(
         with deadline(seconds):
             for tree in config.trees:
                 current = tree
-                result = _sample_tree(config, tree, log, warn, sample)
+                result = _sample_tree(config, tree, log, warn, sample, clock)
                 current = None
                 log.info("%s", describe_sample(result))
     except Overrun:
@@ -254,8 +272,12 @@ def _sample_tree(
     log: logging.Logger,
     warn: Callable[[str], None],
     sample: Sampler,
+    clock: Callable[[], float],
 ) -> SampleResult:
-    """Sample TREE; a FatalError gains the tree's ROOT."""
+    """Sample TREE, logging its walk's counts at DEBUG every PROGRESS_INTERVAL.
+
+    A FatalError gains the tree's ROOT.
+    """
     opts = SampleOptions(
         dsn=config.dsn,
         root=tree.root,
@@ -263,13 +285,14 @@ def _sample_tree(
         max_dirs=tree.max_dirs,
         jobs=tree.jobs,
     )
+    progress = LogProgress(log, tree.root, clock=clock, interval=PROGRESS_INTERVAL)
     log.debug("sampling %s", tree.root)
-    clock = time.monotonic()
+    start = clock()
     try:
-        result = sample(opts, warn)
+        result = sample(opts, warn, progress=progress)
     except FatalError as e:
         raise FatalError(f"sample of {tree.root} failed: {e}") from e
-    log.debug("sampled %s in %.1f s", tree.root, time.monotonic() - clock)
+    log.debug("sampled %s in %.1f s", tree.root, clock() - start)
     return result
 
 

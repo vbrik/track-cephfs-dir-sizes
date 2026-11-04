@@ -22,7 +22,7 @@ from trackdir.live import (
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
 from trackdir.model import MAX_DEPTH_LIMIT, MAX_DIRS_LIMIT, DirProbe, error_counts
-from trackdir.progress import NO_PROGRESS, Progress
+from trackdir.progress import NO_PROGRESS, Progress, StatusLine
 from trackdir.rstats import RStatMode
 
 NO_CAPTURE = "no capture was written"  # what a failed capture leaves
@@ -292,7 +292,7 @@ def _prepare_capture(args: argparse.Namespace) -> _Command:
     )
 
     def run() -> str:
-        with Progress(sys.stderr) as progress:
+        with StatusLine(sys.stderr) as progress:
             result = run_capture(opts, _warner(progress), progress=progress)
         return render_summary(result)
 
@@ -320,7 +320,7 @@ def _prepare_sample(args: argparse.Namespace) -> _Command:
     )
 
     def run() -> str:
-        with Progress(sys.stderr) as progress:
+        with StatusLine(sys.stderr) as progress:
             result = sample.run_sample(opts, _warner(progress), progress=progress)
         return sample.render_sample_summary(result)
 
@@ -427,7 +427,7 @@ def _commit(
         raise FatalError(f"cannot write {output}: {e.strerror}.") from e
 
 
-def _warner(progress: Progress) -> Callable[[str], None]:
+def _warner(progress: StatusLine) -> Callable[[str], None]:
     """Return a warn callback that erases PROGRESS's line before each warning."""
 
     def warn(message: str) -> None:

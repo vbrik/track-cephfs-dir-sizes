@@ -9,7 +9,7 @@ from conftest import Terminal, status_lines
 
 from trackdir import walker as walker_module
 from trackdir.model import ROOT, DirProbe, ProbeError, Stage, join
-from trackdir.progress import Progress
+from trackdir.progress import StatusLine
 from trackdir.walker import DirLimitExceeded, walk
 
 
@@ -142,7 +142,7 @@ def test_progress_reports_the_start_and_every_probe():
         above(10),
         max_dirs=100,
         jobs=1,
-        progress=Progress(stream, interval=0),
+        progress=StatusLine(stream, interval=0),
     )
     counts = [line.split(", ")[:3] for line in status_lines(stream.getvalue())]
     assert counts[0] == ["probed 0 dirs", "1 queued", "0 errors"]
@@ -163,7 +163,7 @@ def test_progress_keeps_reporting_while_a_probe_stalls(monkeypatch):
         above(10),
         max_dirs=100,
         jobs=1,
-        progress=Progress(stream, interval=0),
+        progress=StatusLine(stream, interval=0),
     )
     assert (
         len(status_lines(stream.getvalue())) >= 5

@@ -130,7 +130,9 @@ startup (section 5), not here: only the filesystem knows a `TreeKey`.
   is split: `describe_sample(result) -> str` returns the one-line text, and
   `render_sample_summary` wraps it with `paragraph()`. `FatalError` messages
   and warnings are already unwrapped text.
-- The daemon passes `NO_PROGRESS`: no status line.
+- The daemon passes each tree's sample a `progress.LogProgress`: no status
+  line, but the walk's counts (the status line's text, `progress.walk_text`)
+  logged at DEBUG every `PROGRESS_INTERVAL` (5 min) of the walk.
 
 Events and levels:
 
@@ -145,8 +147,11 @@ Events and levels:
 | ERROR | fatal | `the database has no trackdir schema. Create it with: trackdir db init` |
 | ERROR | overrun | `cycle did not finish within the interval 6h; sample of /mnt/cephfs/home aborted, nothing was stored for it. Raise interval or sample fewer or smaller trees.` |
 | ERROR | bug | `unexpected error`, followed by the traceback |
+| DEBUG | tree start, end | `sampling /mnt/cephfs/projects`, `sampled /mnt/cephfs/projects in 812.4 s` |
+| DEBUG | walk progress, every 5 min | `progress of /mnt/cephfs/projects: probed 412,331 dirs, 1,204 queued, 3 errors, 2,148 dirs/s, 3m12s` |
 
-DEBUG adds the start and the end of each tree's sample.
+The walk's elapsed time counts from its first probe, after the baseline is
+loaded; a walk shorter than 5 minutes logs no progress line.
 
 ## 5. Startup
 

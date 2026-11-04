@@ -56,7 +56,8 @@ class FakeTime:
 class FakeSampler:
     """Records (root, start time) per call; each sample takes DURATION seconds.
 
-    ACTION, if given, runs first with the options and the warn callback.
+    ACTION, if given, runs first with the options, the warn callback and the
+    progress.
     """
 
     def __init__(self, fake_time: FakeTime, duration: float = 10.0, action=None):
@@ -65,10 +66,10 @@ class FakeSampler:
         self.action = action
         self.calls: list[tuple[str, float]] = []
 
-    def __call__(self, opts, warn):
+    def __call__(self, opts, warn, *, progress):
         self.calls.append((str(opts.root), self.time.now))
         if self.action is not None:
-            self.action(opts, warn)
+            self.action(opts, warn, progress)
         self.time.now += self.duration
         return sample_result(root=str(opts.root))
 
@@ -206,7 +207,7 @@ def test_first_cycle_waits_for_the_database(tmp_path):
 
 
 def test_fatal_sample_error_exits_1(tmp_path):
-    def fail_on_b(opts, warn):
+    def fail_on_b(opts, warn, progress):
         if str(opts.root) == ROOTS[1]:
             raise FatalError("database error: x.")
 
@@ -228,7 +229,7 @@ def test_fatal_sample_error_exits_1(tmp_path):
 
 
 def test_bug_is_logged_with_traceback(tmp_path, capsys):
-    def boom(opts, warn):
+    def boom(opts, warn, progress):
         raise RuntimeError("boom")
 
     fake = FakeTime(stop_after=5)
@@ -249,7 +250,9 @@ def test_bug_is_logged_with_traceback(tmp_path, capsys):
 
 def test_warnings_logged_once(tmp_path):
     fake = FakeTime(stop_after=2)
-    sampler = FakeSampler(fake, action=lambda opts, warn: warn(MSG_NO_DIRSTAT))
+    sampler = FakeSampler(
+        fake, action=lambda opts, warn, progress: warn(MSG_NO_DIRSTAT)
+    )
     out = io.StringIO()
     run(
         write_config(tmp_path),
@@ -264,7 +267,7 @@ def test_warnings_logged_once(tmp_path):
 
 
 def test_overrun_exits_1():
-    def slow(opts, warn):
+    def slow(opts, warn, *, progress):
         time.sleep(2)
         pytest.fail("the deadline did not interrupt the sample")
 
@@ -280,6 +283,53 @@ def test_overrun_exits_1():
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
+def test_walk_progress_is_logged_at_debug_once_per_interval(tmp_path):
+    def walk(opts, warn, progress):
+        progress.phase("loading the baseline")
+        progress.walk(probed=0, queued=1, errors=0)  # starts the walk's clock
+        fake.now += daemon.PROGRESS_INTERVAL - 1
+        progress.walk(probed=10, queued=5, errors=0)  # too early
+        fake.now += 1
+        progress.walk(probed=600, queued=40, errors=2)
+        fake.now += daemon.PROGRESS_INTERVAL / 2
+        progress.walk(probed=900, queued=9, errors=2)  # too early again
+
+    fake = FakeTime(stop_after=1)
+    out = io.StringIO()
+    run(
+        write_config(tmp_path, roots=ROOTS[:1], extra='log_level = "DEBUG"'),
+        stream=out,
+        inspect=lambda config, warn: (None,),
+        sample=FakeSampler(fake, action=walk),
+        clock=fake.clock,
+        sleep=fake.sleep,
+    )
+    progress = [m for level, m in lines(out) if m.startswith("progress of ")]
+    assert progress == [
+        f"progress of {ROOTS[0]}: probed 600 dirs, 40 queued, 2 errors, 2 dirs/s, 5m00s"
+    ]
+    assert ("DEBUG", progress[0]) in lines(out)
+
+
+def test_walk_progress_is_not_logged_at_info(tmp_path):
+    def walk(opts, warn, progress):
+        progress.walk(probed=0, queued=1, errors=0)
+        fake.now += 10 * daemon.PROGRESS_INTERVAL
+        progress.walk(probed=1, queued=0, errors=0)
+
+    fake = FakeTime(stop_after=1)
+    out = io.StringIO()
+    run(
+        write_config(tmp_path, roots=ROOTS[:1]),
+        stream=out,
+        inspect=lambda config, warn: (None,),
+        sample=FakeSampler(fake, action=walk),
+        clock=fake.clock,
+        sleep=fake.sleep,
+    )
+    assert not any(m.startswith("progress of ") for _, m in lines(out))
+
+
 class UnhandledSignal(BaseException):
     """Raised by the test's guard handler if the daemon did not handle the signal."""
 
@@ -288,7 +338,7 @@ def test_signal_during_sample_stops_cleanly(tmp_path):
     def guard(signum, frame):
         raise UnhandledSignal(signum)
 
-    def terminate(opts, warn):
+    def terminate(opts, warn, progress):
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)  # the handler raises long before this returns
         pytest.fail("the signal did not interrupt the sample")
@@ -345,7 +395,7 @@ def test_bad_config_exits_1(tmp_path):
 
 
 def test_log_level_applies_after_loading(tmp_path):
-    def fail(opts, warn):
+    def fail(opts, warn, progress):
         raise FatalError("database error: x.")
 
     fake = FakeTime(stop_after=5)

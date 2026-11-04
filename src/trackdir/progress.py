@@ -1,22 +1,35 @@
-"""A status line on stderr, so a long run shows it is working.
+"""Progress of a long run, so it shows it is working.
 
-Only a terminal gets it: logs and pipes stay free of carriage returns. The line
-is redrawn in place and erased before any other message, so it never mixes
-with them, and it is cut to the terminal's width, since a wrapped line cannot
-be redrawn.
+A manual command draws a StatusLine on stderr. Only a terminal gets it: logs
+and pipes stay free of carriage returns. The line is redrawn in place and
+erased before any other message, so it never mixes with them, and it is cut to
+the terminal's width, since a wrapped line cannot be redrawn.
+
+The daemon logs a walk's counts with LogProgress instead, once per interval.
 """
 
+import logging
 import os
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Self, TextIO
+from typing import Protocol, Self, TextIO
 
 ERASE_TO_END = "\x1b[K"
 DEFAULT_COLUMNS = 80  # when the terminal does not report its width
 
 
-class Progress:
+class Progress(Protocol):
+    """Where a run reports its steps and its walk's counts."""
+
+    def phase(self, text: str) -> None:
+        """Report the step TEXT; the next walk call starts a new walk."""
+
+    def walk(self, *, probed: int, queued: int, errors: int) -> None:
+        """Report a walk's counts; the first call after a phase starts its clock."""
+
+
+class StatusLine:
     """The status line of one run; a context manager that erases it on exit.
 
     Does nothing unless STREAM is a terminal. CLOCK returns seconds; the walk
@@ -62,12 +75,7 @@ class Progress:
             self._walk_started = now
         elif now - self._last_draw < self._interval:
             return
-        elapsed = now - self._walk_started
-        rate = probed / elapsed if elapsed > 0 else 0
-        self._draw(
-            f"probed {probed:,} dirs, {queued:,} queued, {errors:,} errors, "
-            f"{rate:,.0f} dirs/s, {_duration(elapsed)}"
-        )
+        self._draw(walk_text(probed, queued, errors, now - self._walk_started))
 
     def clear(self) -> None:
         """Erase the line, if it holds text, so another message can follow."""
@@ -92,8 +100,61 @@ class Progress:
         return columns or DEFAULT_COLUMNS  # a pty nobody sized reports 0
 
 
+class LogProgress:
+    """Logs a walk's counts at DEBUG to LOG, once per INTERVAL seconds of it.
+
+    Each line starts with "progress of LABEL". Nothing is logged in a walk's
+    first INTERVAL seconds, nor for steps. CLOCK returns seconds.
+    """
+
+    def __init__(
+        self,
+        log: logging.Logger,
+        label: object,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        interval: float,
+    ) -> None:
+        self._log = log
+        self._label = label
+        self._clock = clock
+        self._interval = interval
+        self._walk_started: float | None = None
+        self._last_log = 0.0
+
+    def phase(self, text: str) -> None:
+        """Start a new walk at the next walk call; TEXT is not logged."""
+        self._walk_started = None
+
+    def walk(self, *, probed: int, queued: int, errors: int) -> None:
+        """Log the counts if INTERVAL seconds passed since the walk's last line."""
+        if not self._log.isEnabledFor(logging.DEBUG):
+            return
+        now = self._clock()
+        if self._walk_started is None:
+            self._walk_started = self._last_log = now
+            return
+        if now - self._last_log < self._interval:
+            return
+        self._last_log = now
+        self._log.debug(
+            "progress of %s: %s",
+            self._label,
+            walk_text(probed, queued, errors, now - self._walk_started),
+        )
+
+
 # Shown by nothing; the default where a caller passes no Progress.
-NO_PROGRESS = Progress(None)
+NO_PROGRESS = StatusLine(None)
+
+
+def walk_text(probed: int, queued: int, errors: int, elapsed: float) -> str:
+    """Return a walk's counts, rate and ELAPSED seconds as one line."""
+    rate = probed / elapsed if elapsed > 0 else 0
+    return (
+        f"probed {probed:,} dirs, {queued:,} queued, {errors:,} errors, "
+        f"{rate:,.0f} dirs/s, {_duration(elapsed)}"
+    )
 
 
 def _duration(seconds: float) -> str:

@@ -28,7 +28,7 @@ from trackdir.db import (
 from trackdir.dbcli import describe_tree
 from trackdir.messages import FatalError, paragraph
 from trackdir.model import ROOT, error_counts
-from trackdir.progress import Progress
+from trackdir.progress import StatusLine
 from trackdir.sample import (
     SampleOptions,
     describe_sample,
@@ -416,7 +416,7 @@ def test_replay_reports_each_phase(db, dsn):
     sample.run_db_init(dsn)
     stream = Terminal()
     opts = SampleOptions(dsn=dsn, replay=SUBTREE)
-    result = run_sample(opts, print, progress=Progress(stream))
+    result = run_sample(opts, print, progress=StatusLine(stream))
     assert status_phases(stream.getvalue()) == [
         "loading the capture",
         "loading the baseline",

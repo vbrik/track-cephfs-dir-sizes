@@ -20,7 +20,7 @@ from trackdir.cli import (
     run_capture,
 )
 from trackdir.mount import MountError
-from trackdir.progress import Progress
+from trackdir.progress import StatusLine
 from trackdir.rstats import RStatMode
 
 
@@ -334,7 +334,7 @@ def test_usage_errors_exit_2(args):
 
 def test_capture_reports_walk_and_write(tree, tmp_path, fake_ceph):
     stream = Terminal()
-    run_capture(options(tree, tmp_path), print, progress=Progress(stream))
+    run_capture(options(tree, tmp_path), print, progress=StatusLine(stream))
     walking, writing = status_phases(stream.getvalue())
     assert walking == "probed"
     assert f"writing {tmp_path / 'out.jsonl.gz'}".startswith(writing)  # cut to fit
@@ -370,7 +370,7 @@ def test_main_erases_the_progress_line_before_an_error(
 def test_warning_erases_the_progress_line_first(monkeypatch):
     stderr = Terminal()
     monkeypatch.setattr(sys, "stderr", stderr)
-    progress = Progress(stderr)
+    progress = StatusLine(stderr)
     progress.phase("loading the baseline")
     cli._warner(progress)("slow")
     assert stderr.getvalue() == "\rloading the baseline\x1b[K\r\x1b[KWARNING: slow\n"
