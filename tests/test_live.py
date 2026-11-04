@@ -53,6 +53,26 @@ def test_fsid_mismatch_is_fatal(tree, fake_ceph, monkeypatch):
     assert "reports cluster fsid fsid, but its mount names other" in message
 
 
+def test_null_mount_fsid_warns_and_trusts_root(tree, fake_ceph, monkeypatch):
+    monkeypatch.setattr(
+        live, "identify", lambda fd, root: CephMount(live.NULL_FSID, None, "/")
+    )
+    warnings = []
+    with open_live_root(tree, warnings.append) as root:
+        assert root.cluster_fsid == "fsid"
+    [message] = [collapse(w) for w in warnings if live.NULL_FSID in w]
+    assert f"ROOT {tree} reports cluster fsid fsid, but its mount names" in message
+    assert "Using fsid" in message
+
+
+def test_matching_fsid_does_not_warn(tree, fake_ceph, monkeypatch):
+    monkeypatch.setattr(live, "identify", lambda fd, root: CephMount("fsid", None, "/"))
+    warnings = []
+    with open_live_root(tree, warnings.append):
+        pass
+    assert not [w for w in warnings if "cluster fsid" in w]
+
+
 def test_identity_uses_the_resolved_root(tree, fake_ceph, monkeypatch):
     seen = []
 

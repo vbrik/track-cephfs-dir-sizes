@@ -47,6 +47,8 @@ DEFAULT_MAX_DIRS = 10_000_000
 DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.
 DEFAULT_LIMIT_ADVICE = "Raise --max-dirs if memory allows, or lower --max-depth."
+# Some mounts name this placeholder instead of their cluster's fsid.
+NULL_FSID = "00000000-0000-0000-0000-000000000000"
 
 MSG_NO_OPENAT2_AS_ROOT = (
     "this kernel does not provide openat2 (Linux 5.6+), which trackdir needs "
@@ -92,10 +94,11 @@ class LiveWalk:
 def open_live_root(path: Path, warn: Callable[[str], None]) -> Iterator[LiveRoot]:
     """Open ROOT at PATH, inspect it, and yield it; close it on exit.
 
-    Calls WARN once per degraded mode (no openat2, no dirstat) before
-    yielding. Raises FatalError if ROOT cannot be opened, is not a CephFS
-    directory whose cluster fsid and mount can be identified, or is on a mount
-    that names a different cluster fsid than ROOT reports.
+    Calls WARN once per degraded mode (no openat2, no dirstat) and if ROOT's
+    mount names the all-zero cluster fsid, before yielding. Raises FatalError
+    if ROOT cannot be opened, is not a CephFS directory whose cluster fsid and
+    mount can be identified, or is on a mount that names a different (nonzero)
+    cluster fsid than ROOT reports.
     """
     use_openat2 = openat2_supported()
     if not use_openat2:
@@ -104,7 +107,7 @@ def open_live_root(path: Path, warn: Callable[[str], None]) -> Iterator[LiveRoot
         warn(MSG_NO_OPENAT2)
     with _open_root(path, use_openat2) as safe_root:
         resolved = safe_root.resolved_path()
-        live = _inspect(safe_root, path, resolved, use_openat2)
+        live = _inspect(safe_root, path, resolved, use_openat2, warn)
         if live.rstat_mode is RStatMode.GETXATTR:
             warn(MSG_NO_DIRSTAT)
         yield live
@@ -206,11 +209,20 @@ def _open_root(path: Path, use_openat2: bool) -> SafeRoot:
 
 
 def _inspect(
-    safe_root: SafeRoot, path: Path, resolved: str, use_openat2: bool
+    safe_root: SafeRoot,
+    path: Path,
+    resolved: str,
+    use_openat2: bool,
+    warn: Callable[[str], None],
 ) -> LiveRoot:
     """Return the identity of the filesystem and directory of SAFE_ROOT.
 
     PATH is ROOT as given, for messages; RESOLVED is its resolved path.
+
+    The cluster fsid is ROOT's ceph.cluster_fsid, which the client takes from
+    the cluster it is connected to. A mount that names NULL_FSID names no
+    cluster, so that mismatch is only reported with WARN; any other mismatch
+    means the mount is not what it claims and is fatal.
     """
     try:
         fd = safe_root.open(ROOT, os.O_RDONLY)
@@ -238,9 +250,15 @@ def _inspect(
     except OSError as e:
         raise FatalError(f"cannot read ROOT {path}: {e.strerror}.") from e
     if mount.fsid is not None and mount.fsid != fsid:
-        raise FatalError(
+        mismatch = (
             f"ROOT {path} reports cluster fsid {fsid}, but its mount names "
-            f"{mount.fsid}. Check the mount."
+            f"{mount.fsid}."
+        )
+        if mount.fsid != NULL_FSID:
+            raise FatalError(f"{mismatch} Check the mount.")
+        warn(
+            f"{mismatch} Using {fsid}; check the mount's source and fsid "
+            "option if that is not the expected cluster."
         )
     return LiveRoot(
         safe_root=safe_root,
