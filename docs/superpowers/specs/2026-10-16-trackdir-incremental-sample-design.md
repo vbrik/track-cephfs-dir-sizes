@@ -357,6 +357,11 @@ Verdict:
   retained heap is 0.497 KiB per directory, 0.5 GB per million; the process
   grows by 0.8 GB per million, and the peak during loading is 1.25-1.62 GiB per
   million (cause not investigated).
+  (Corrected 2026-11-05: measured directly on an 855k-directory tree, in a
+  fresh process after connecting, `load_baseline` grows RSS by 460-500 MiB at
+  its peak, about 0.55 GiB per million, close to what it retains. The
+  extrapolation from 72k directories overstated the peak; why was not
+  investigated.)
   The remedies named above (a `tree_id` index, a current-state table) change
   how rows are found, not how many are held in the baseline dict, so they do not
   address this threshold. Nothing is added in this plan; if trees near
@@ -398,7 +403,7 @@ Verdict:
   directories it cannot read; the next root sample restores them (the retry
   set reaches them). Anyone reading current state meanwhile sees the errors.
 - **Memory.** The baseline is a dict of all current paths (about 0.5 KB per
-  directory retained, up to about 1.6 GB peak per million while loading;
+  directory retained, about 0.55 GB per million at the peak of loading;
   measured, see section 8). An incremental walk probes only part of the tree,
   so its `--max-dirs` check misses a tree that grew past the limit after its
   initial sample. (Amended 2026-11-05: `load_baseline` now stops after

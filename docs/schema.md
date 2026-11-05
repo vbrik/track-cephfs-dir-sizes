@@ -32,13 +32,14 @@ columns. trackdir itself refuses a database at another version.
 ### `tree`
 
 A directory of a CephFS filesystem, sampled to one depth; the same tree whatever
-host or mount point samples it. The four identity columns are unique together.
+host or mount point samples it, as long as every mount names the filesystem
+the same way (see `fs_name`). The four identity columns are unique together.
 
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | bigint | Primary key. |
 | `cluster_fsid` | text | Ceph cluster fsid. |
-| `fs_name` | text | CephFS filesystem name; NULL means the cluster's default filesystem. |
+| `fs_name` | text | CephFS filesystem name as the mount names it; NULL: the mount did not name one, so it is the cluster's default. A mount that names the default filesystem gives another tree. |
 | `fs_path` | bytea | The directory's absolute path inside the filesystem; `/` is its root. |
 | `max_depth` | integer | Deepest level sampled; ROOT is depth 0. |
 
@@ -101,6 +102,12 @@ Each path's latest `dir_state` row in its tree, by the sample's
 `(started, id)`, without tombstoned paths: the tree as of its latest sample.
 Columns are `tree_id` followed by those of `dir_state`.
 
+The view is computed on every read by sorting the tree's stored rows; there
+are no indexes beyond the primary keys. Conditions on `tree_id` and `path`
+are applied before that sort, so reading a few paths is fast; any other
+condition (e.g. `error_stage IS NOT NULL`) applies after it, so the whole
+tree is sorted.
+
 ## Example queries
 
 A tree's current size:
@@ -131,4 +138,34 @@ SELECT * FROM (
     ORDER BY d.path, s.started DESC, s.id DESC
 ) asof
 WHERE NOT deleted;
+```
+
+## Access
+
+The schema needs PostgreSQL 15 or newer. `trackdir db init` creates it, so
+its role needs `CREATE` on the database, and schema `trackdir` must not exist
+yet: an existing one, even empty, is refused as incomplete. That role owns
+every table; run `trackdir sample` and `trackdir daemon` as it.
+
+A read-only role can run `trackdir db summary` and the example queries above;
+sampling as it fails with "permission denied" and stores nothing:
+
+```sql
+GRANT USAGE ON SCHEMA trackdir TO reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA trackdir TO reader;  -- includes the view
+```
+
+### Removing a tree
+
+A sample's rows are changes, not a listing, so samples cannot be deleted one
+by one (deleting one that has rows fails). Remove a whole tree, here tree 3,
+rows first, while nothing samples it:
+
+```sql
+BEGIN;
+DELETE FROM trackdir.dir_state
+WHERE sample_id IN (SELECT id FROM trackdir.sample WHERE tree_id = 3);
+DELETE FROM trackdir.sample WHERE tree_id = 3;
+DELETE FROM trackdir.tree WHERE id = 3;
+COMMIT;
 ```

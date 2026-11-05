@@ -19,7 +19,8 @@ All commands are read-only on ROOT. See `trackdir COMMAND --help` for options.
 
 - Linux with the CephFS kernel client (not ceph-fuse). Running as root needs
   openat2 (Linux 5.6+).
-- Python 3.12+; `sample` and `db` also need psycopg and a PostgreSQL server.
+- Python 3.12+; `sample` and `db` also need psycopg and PostgreSQL 15 or newer
+  (the schema uses `UNIQUE NULLS NOT DISTINCT`).
 - Recommended: the `dirstat` mount option, which cuts the metadata requests
   per directory from four to one.
 
@@ -40,9 +41,18 @@ To update, `git pull`; no reinstall is needed.
 Put the database password in `~/.pgpass` or `PGPASSWORD`, never in `--db`:
 `ps` shows command lines to every local user.
 
+`db init` creates the schema `trackdir`, so its role needs `CREATE` on the
+database, and the schema must not exist yet. Sample as that role. For
+read-only users and for removing a tree, see
+[docs/schema.md](docs/schema.md#access).
+
 A tree is identified by cluster fsid, filesystem name, path inside the
 filesystem and `--max-depth`, whichever host or mount point samples it. A run
-with another depth is a different tree and starts a new history.
+with another depth is a different tree and starts a new history. So is a run
+through a mount that names the filesystem (source `USER@FSID.NAME=/PATH`, or
+option `fs=` or `mds_namespace=`) when earlier runs used one that does not
+(the cluster's default filesystem), even if it is the same filesystem: mount
+it the same way on every host.
 
 A tree's first sample stores every directory. Later samples list a directory's
 children only if the directory changed since the last sample, and store only
@@ -61,8 +71,8 @@ reading them.
   message counts the skipped subtrees with a pinned rctime.
 - Elsewhere, a rename is recorded as a deletion plus a creation.
 - A walk holds the directories it probes in memory, about 0.7 KB each; the
-  previous state takes about 0.5 GB, and up to 1.6 GB while loading, per
-  million directories. `--max-dirs` limits both.
+  previous state takes about 0.55 GB per million directories, including while
+  it loads. `--max-dirs` limits both.
 
 ## Run as a daemon
 

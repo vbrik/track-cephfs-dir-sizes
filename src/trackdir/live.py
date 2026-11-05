@@ -43,8 +43,8 @@ from trackdir.walker import walk
 
 # Probes stay in memory until the end: ~0.6 KB each (measured), plus ~0.13 KB
 # each while the walk sorts them, so ~7 GB at the limit. A sample also holds
-# the baseline, which the limit bounds too: ~0.5 GB per million current
-# directories, up to ~1.6 GB while loading.
+# the baseline, which the limit bounds too: ~0.55 GB per million current
+# directories, including while it loads (measured at 855k).
 DEFAULT_MAX_DIRS = 10_000_000
 DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.
