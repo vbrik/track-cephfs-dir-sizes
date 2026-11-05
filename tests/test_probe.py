@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from trackdir import probe as probe_module
-from trackdir.model import ROOT, DirProbe, ProbeError, RStats, Stage
+from trackdir.model import GONE, ROOT, DirProbe, ProbeError, RStats, Stage
 from trackdir.probe import LiveBackend
 from trackdir.rstats import RStatsError
 
@@ -110,6 +110,21 @@ def test_symlink_file_and_vanished_dir_give_open_errors(tmp_path, backend):
     for path, code in [(b"l", "ELOOP"), (b"f", "ENOTDIR"), (b"gone", "ENOENT")]:
         error = ProbeError(Stage.OPEN, code)
         assert backend.probe(path, list_all) == DirProbe(path, error=error)
+
+
+def test_dir_removed_after_open_is_gone(tmp_path, safe_root, monkeypatch):
+    victim = tmp_path / "d"
+    victim.mkdir()
+    real_fstat = os.fstat
+
+    def fstat_after_rmdir(fd):
+        if victim.exists():
+            victim.rmdir()
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", fstat_after_rmdir)
+    backend = LiveBackend(safe_root, lambda fd: pytest.fail("read rstats"))
+    assert backend.probe(b"d", list_all) == DirProbe(b"d", error=GONE)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read any directory")

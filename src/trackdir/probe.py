@@ -5,7 +5,15 @@ import os
 from collections.abc import Callable
 from dataclasses import replace
 
-from trackdir.model import DirProbe, ProbeError, RStats, ShouldList, Stage, errno_name
+from trackdir.model import (
+    GONE,
+    DirProbe,
+    ProbeError,
+    RStats,
+    ShouldList,
+    Stage,
+    errno_name,
+)
 from trackdir.rstats import RStatsError
 from trackdir.safeopen import SafeRoot
 
@@ -30,7 +38,8 @@ class LiveBackend:
 
         At most one error is recorded: the first, except that a readdir error
         replaces an rstats error, because the stage tells readers whether the
-        directory was listed.
+        directory was listed. A directory removed after its open is GONE, as is
+        one that no longer opens.
         """
         try:
             fd = self._root.open(path, os.O_RDONLY)
@@ -63,6 +72,8 @@ class LiveBackend:
             st = os.fstat(fd)
         except OSError as e:
             return DirProbe(path, error=ProbeError(Stage.STAT, errno_name(e.errno)))
+        if st.st_nlink == 0:  # removed since the open
+            return DirProbe(path, error=GONE)
         probe = _with_stat(DirProbe(path), st)
         try:
             rs = self._read_rstats(fd)

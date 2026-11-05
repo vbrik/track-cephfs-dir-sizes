@@ -39,6 +39,11 @@ class ProbeError:
     code: str  # errno name such as "EACCES", or DIRSTAT_STALE, PARSE
 
 
+# The directory is gone: open failed with ENOENT, or fstat showed it removed
+# after the open (nlink 0). A sample stores a tombstone for it, not an error row.
+GONE = ProbeError(Stage.OPEN, "ENOENT")
+
+
 @dataclass(frozen=True, slots=True)
 class RStats:
     """CephFS recursive statistics of one directory's subtree."""

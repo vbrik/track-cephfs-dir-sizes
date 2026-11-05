@@ -13,11 +13,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Self
 
 from trackdir.model import (
+    GONE,
     ROOT,
     DirProbe,
-    ProbeError,
     ShouldList,
-    Stage,
     join,
     split,
     tree_key,
@@ -41,7 +40,6 @@ ROW_COLUMNS = (
 type Row = tuple[int | str | None, ...]
 
 _ERROR_STAGE = ROW_COLUMNS.index("error_stage")
-_OPEN_ENOENT = ProbeError(Stage.OPEN, "ENOENT")  # the directory is gone
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
@@ -155,10 +153,10 @@ def diff(
     """Compare the PROBES of a walk (in tree order) started at STARTED with BASELINE.
 
     changed holds every probe whose row differs from its baseline row (a
-    missing baseline row differs), except "open ENOENT" probes, which mean
-    deletion. deleted holds the baseline children missing from the listing of a
-    successfully listed parent, and the paths of "open ENOENT" probes that have
-    a baseline row, plus all baseline descendants of those. Nothing is deleted
+    missing baseline row differs), except GONE probes. deleted holds the
+    baseline children missing from the listing of a successfully listed parent,
+    and the paths of GONE probes that have a baseline row, plus all baseline
+    descendants of those. Nothing is deleted
     below a directory that was not listed. skipped counts the unlisted
     directories without an error above MAX_DEPTH: those the walk pruned.
 
@@ -179,7 +177,7 @@ def diff(
             skipped += 1
             if probe.rctime is not None and probe.rctime > pinned_after:
                 skipped_pinned += 1
-        if probe.error == _OPEN_ENOENT:
+        if probe.error == GONE:
             if probe.path in baseline.rows:
                 gone.add(probe.path)
         elif row_of(probe) != baseline.rows.get(probe.path):
