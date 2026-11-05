@@ -18,6 +18,7 @@ from conftest import (
 from trackdir import dbcli, live, sample
 from trackdir.cli import main
 from trackdir.db import (
+    SCHEMA_VERSION,
     ConcurrentSample,
     DbError,
     OutOfOrderSample,
@@ -291,7 +292,10 @@ def test_database_error_says_what_was_left(monkeypatch, capsys, args, outcome):
 
 @pytest.mark.parametrize(
     ("found", "next_step"),
-    [(1, "migrate it, or drop schema trackdir"), (None, "drop schema trackdir")],
+    [
+        (SCHEMA_VERSION - 1, "keep using the older trackdir with this database"),
+        (None, "no version recorded"),
+    ],
 )
 def test_schema_version_mismatch_says_what_to_do(monkeypatch, capsys, found, next_step):
     error = SchemaVersionMismatch(found)
@@ -300,8 +304,23 @@ def test_schema_version_mismatch_says_what_to_do(monkeypatch, capsys, found, nex
     err = collapse(capsys.readouterr().err)
     assert err.count("ERROR:") == 1
     assert next_step in err
-    assert "deletes" in err
+    assert "migrate" not in err  # no migration exists
+    assert "drop schema trackdir, which deletes all stored samples" in err
     assert err.endswith("trackdir db init")
+
+
+def test_newer_schema_says_upgrade_trackdir_not_drop(monkeypatch, capsys):
+    # A host whose trackdir is older than the database's must not be told to
+    # delete the samples that newer trackdirs stored.
+    error = SchemaVersionMismatch(SCHEMA_VERSION + 1)
+    monkeypatch.setattr(dbcli, "connect", fail_to_connect(error))
+    assert main(["db", "summary", "--db", "x"]) == 1
+    err = collapse(capsys.readouterr().err)
+    assert err == (
+        f"ERROR: the database's trackdir schema is version {SCHEMA_VERSION + 1}, "
+        f"from a newer trackdir, but this trackdir needs version {SCHEMA_VERSION}. "
+        "Upgrade trackdir on this host."
+    )
 
 
 def test_unreachable_database_fails_before_walking(

@@ -65,11 +65,20 @@ def _db_message(e: DbError, unchanged: str) -> str:
                 f"recorded), but this trackdir needs version {SCHEMA_VERSION}. "
                 f"An administrator must {_DROP_AND_INIT}"
             )
+        case SchemaVersionMismatch(found=found) if found > SCHEMA_VERSION:
+            # Dropping would delete what newer trackdirs stored; upgrading loses
+            # nothing.
+            return (
+                f"the database's trackdir schema is version {found}, from a "
+                f"newer trackdir, but this trackdir needs version "
+                f"{SCHEMA_VERSION}. Upgrade trackdir on this host."
+            )
         case SchemaVersionMismatch(found=found):
             return (
-                f"the database's trackdir schema is version {found}, from "
-                f"another trackdir version, but this trackdir needs version "
-                f"{SCHEMA_VERSION}. An administrator must migrate it, or "
+                f"the database's trackdir schema is version {found}, from an "
+                f"older trackdir, but this trackdir needs version "
+                f"{SCHEMA_VERSION}. There is no migration: keep using the older "
+                f"trackdir with this database, or have an administrator "
                 f"{_DROP_AND_INIT}"
             )
         case ConcurrentSample(key=key):
