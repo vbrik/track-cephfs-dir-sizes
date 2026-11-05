@@ -10,3 +10,11 @@
   (backslashreplace) for human-readable output, fsdecode only for JSON with
   `ensure_ascii`. Test with a non-UTF-8 name such as `b"caf\xe9"`; anonymized
   fixtures never contain one.
+- Before calling a directory deleted mid-probe a bug, check the VFS on a
+  scratch directory: glibc turns getdents' ENOENT on a removed directory into
+  end of directory (an empty listing, not an error), and rmdir needs an empty
+  directory, so that empty listing is accurate.
+- A full capture is not an atomic snapshot: deeper directories are read later
+  and can show changes their ancestors do not. Before reporting a mismatch
+  between a pruned replay and a full capture, compare the mismatched rows'
+  rctime with the capture's start.
