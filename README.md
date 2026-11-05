@@ -54,12 +54,15 @@ reading them.
 
 - CephFS propagates rstats up the tree with a delay, so a change may show up
   only in a later sample.
-- Under a directory with a pinned rctime (often `4294967295`), a rewrite that
-  keeps size, file count and directory count unchanged is not seen. The
-  sample's message counts the skipped subtrees with a pinned rctime.
-- A rename is recorded as a deletion plus a creation.
-- The previous state is held in memory: about 0.5 GB, and up to 1.6 GB while
-  loading, per million directories.
+- Under a directory with a pinned rctime (often `4294967295`), a change that
+  keeps that directory's size, file count and directory count is not seen
+  until they change for another reason: a same-size rewrite, or a move between
+  its subdirectories, whose size stays counted at the old place. The sample's
+  message counts the skipped subtrees with a pinned rctime.
+- Elsewhere, a rename is recorded as a deletion plus a creation.
+- A walk holds the directories it probes in memory, about 0.7 KB each; the
+  previous state takes about 0.5 GB, and up to 1.6 GB while loading, per
+  million directories. `--max-dirs` limits both.
 
 ## Run as a daemon
 

@@ -161,9 +161,10 @@ def diff(
     directories without an error above MAX_DEPTH: those the walk pruned.
 
     skipped_pinned counts the pruned directories whose rctime is after STARTED.
-    Pruning them relied on the other columns alone, so it would miss a same-size
-    rewrite below. A pruned row equals the baseline's, which an earlier sample
-    stored, so a directory changed during this walk is never counted.
+    Pruning them relied on the other columns alone, so it would miss a change
+    below that keeps sizes and counts, such as a move. A pruned row equals the
+    baseline's, which an earlier sample stored, so a directory changed during
+    this walk is never counted.
     """
     pinned_after = (started - _EPOCH) // timedelta(microseconds=1) * 1000  # ns
     changed: list[DirProbe] = []

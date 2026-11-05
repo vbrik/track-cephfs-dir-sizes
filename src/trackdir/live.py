@@ -41,9 +41,10 @@ from trackdir.rstats import (
 from trackdir.safeopen import SafeRoot, openat2_supported
 from trackdir.walker import walk
 
-# Probes stay in memory until the end: ~0.6 KB each (measured), so ~6 GB at
-# the limit. A sample also holds the baseline: ~0.5 GB per million current
-# directories, more while loading.
+# Probes stay in memory until the end: ~0.6 KB each (measured), plus ~0.13 KB
+# each while the walk sorts them, so ~7 GB at the limit. A sample also holds
+# the baseline, which the limit bounds too: ~0.5 GB per million current
+# directories, up to ~1.6 GB while loading.
 DEFAULT_MAX_DIRS = 10_000_000
 DEFAULT_JOBS = 16  # concurrent probes; each mostly waits on MDS round trips
 # What to do when a walk exceeds --max-dirs; ends the FatalError message.

@@ -207,7 +207,8 @@ def test_render_sample_summary():
         "Stored sample 7 (incremental): probed 1204 directories under "
         "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
         "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees skipped (12 with "
-        "a pinned rctime, under which a same-size rewrite goes unseen); none had "
+        "a pinned rctime, under which a change that keeps sizes and counts, such "
+        "as a move, goes unseen); none had "
         "errors. Walk 3.2 s, store 0.1 s."
     )
 

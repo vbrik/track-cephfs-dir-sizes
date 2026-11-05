@@ -56,7 +56,7 @@ class CaptureHeader:
     max_depth: int
     cluster_fsid: str
     fs_name: str | None  # None if the mount does not name its filesystem
-    fs_path: str  # root's absolute path in the filesystem; with the two above, the key
+    fs_path: str  # root's absolute path in the filesystem; part of the tree key
     rstat_mode: str  # an RStatMode value
     openat2: bool
     jobs: int

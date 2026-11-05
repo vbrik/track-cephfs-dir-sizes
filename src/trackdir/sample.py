@@ -211,7 +211,7 @@ def describe_sample(result: SampleResult) -> str:
         if result.skipped_pinned:
             counts += (
                 f" ({result.skipped_pinned} with a pinned rctime, under which a "
-                "same-size rewrite goes unseen)"
+                "change that keeps sizes and counts, such as a move, goes unseen)"
             )
     text = (
         f"Stored sample {result.sample_id} ({result.kind}): {counts}; "

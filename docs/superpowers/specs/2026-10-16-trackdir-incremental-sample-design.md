@@ -390,7 +390,10 @@ Verdict:
 - **Persistent errors** (e.g. a root-only directory seen by a non-root
   sampler) keep their ancestors in the retry set: each sample re-probes the
   path to them and lists each ancestor's children. Cost is proportional to
-  the number of such directories times their depth, not to the tree.
+  the number of children of those ancestors, not to the tree. (Amended
+  2026-11-05: this said "such directories times their depth". Measured on a
+  72k-directory non-root capture with 41 EACCES directories: 1,533 probes
+  with the retry set, 826 without.)
 - **Mixed users.** A non-root sample after a root one stores error rows for
   directories it cannot read; the next root sample restores them (the retry
   set reaches them). Anyone reading current state meanwhile sees the errors.
