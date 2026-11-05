@@ -15,6 +15,17 @@ def test_deadline_raises_overrun():
     assert signal.getsignal(signal.SIGALRM) is before
 
 
+def test_deadline_calls_on_expire_before_the_body_unwinds():
+    calls = []
+    seen_while_unwinding = []
+    with pytest.raises(Overrun), deadline(0.05, on_expire=lambda: calls.append(1)):
+        try:
+            time.sleep(2)
+        finally:
+            seen_while_unwinding.extend(calls)
+    assert seen_while_unwinding == [1]
+
+
 def test_deadline_disarms_on_normal_exit():
     before = signal.getsignal(signal.SIGALRM)
     with deadline(5):

@@ -85,7 +85,9 @@ the samples in the database.
 
 Per-directory errors are stored as usual. Any other error, including a cycle
 that runs past the next one's start, is logged and **stops the daemon** with
-status 1, so the stopped service is the alarm. Run it without automatic
+status 1, so the stopped service is the alarm. An overrun is logged when it
+happens, but the exit waits for the probes in flight: a probe stuck on an
+unresponsive MDS holds it until the MDS answers. Run it without automatic
 restarts, e.g. with systemd:
 
     [Service]

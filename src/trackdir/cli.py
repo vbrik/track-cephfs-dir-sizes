@@ -117,8 +117,9 @@ max_depth are required; the other keys are shown with their defaults:
 Cycles start one interval apart. The first starts one interval after the
 oldest of the trees' latest samples, or at once if a tree has none, so a
 restart adds no sample. A cycle still running when the next is due is an
-overrun: the sample in progress is aborted and stores nothing (samples the
-cycle already stored stay), and the daemon exits.
+overrun: it is logged at once, the sample in progress is aborted and stores
+nothing (samples the cycle already stored stay), and the daemon exits once the
+probes in flight return, which a stuck MDS can delay.
 
 Per-directory errors are stored and counted, as by trackdir sample. Any other
 error is logged and stops the daemon, so run it under a service manager that

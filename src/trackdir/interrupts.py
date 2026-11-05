@@ -9,7 +9,7 @@ there.
 
 import contextlib
 import signal
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 
 
 class Terminated(BaseException):
@@ -46,15 +46,21 @@ def terminate_on_signals(
 
 
 @contextlib.contextmanager
-def deadline(seconds: float) -> Iterator[None]:
+def deadline(
+    seconds: float, on_expire: Callable[[], None] | None = None
+) -> Iterator[None]:
     """Raise Overrun in the body if it runs longer than SECONDS (> 0).
 
+    ON_EXPIRE, if given, runs when the deadline passes, before Overrun is
+    raised: unwinding can take long (a walk waits for its running probes).
     Uses SIGALRM and ITIMER_REAL, so one deadline at a time per process.
     """
     if seconds <= 0:  # setitimer with 0 would disarm, not fire at once
         raise ValueError(f"deadline must be in the future: {seconds} s")
 
     def handler(signum: int, frame: object) -> None:
+        if on_expire is not None:
+            on_expire()
         raise Overrun
 
     previous = signal.signal(signal.SIGALRM, handler)

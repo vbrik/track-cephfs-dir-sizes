@@ -197,8 +197,9 @@ The loop:
 An aborted walk unwinds as on SIGTERM today: `walker.walk` cancels pending
 probes and waits for running ones, and the database transaction rolls back.
 Samples stored earlier in an overrun cycle stay stored. A probe stuck in the
-kernel on an unresponsive MDS delays the exit until it returns; nothing in
-user space can cut that short.
+kernel on an unresponsive MDS delays the exit until it returns. (Amended
+2026-11-05: the overrun is logged when the deadline passes, from the SIGALRM
+handler, so that delay no longer hides it; the exit still waits.)
 
 ## 7. Errors, signals, exit statuses
 

@@ -277,10 +277,46 @@ def test_overrun_exits_1():
             config_of(Interval(0.2, "0.2s")), 0, log, OnceWarner(log), sample=slow
         )
     assert str(raised.value).startswith(
-        f"cycle did not finish within the interval 0.2s; sample of {ROOTS[0]} "
-        "aborted, nothing was stored for it."
+        f"cycle did not finish within the interval 0.2s; aborting the sample of "
+        f"{ROOTS[0]}, which stores nothing."
     )
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_overrun_is_logged_before_the_sample_unwinds():
+    out = io.StringIO()
+    log = setup_logging(out)
+    logged_while_unwinding = []
+
+    def stuck(opts, warn, *, progress):
+        try:
+            time.sleep(2)
+        finally:  # where an aborted walk waits for its running probes
+            logged_while_unwinding.extend(lines(out))
+
+    with pytest.raises(FatalError) as raised:
+        run_cycles(
+            config_of(Interval(0.2, "0.2s")), 0, log, OnceWarner(log), sample=stuck
+        )
+    assert logged_while_unwinding == [("ERROR", str(raised.value))]
+
+
+def test_overrun_is_logged_once_and_exits_1(tmp_path):
+    def stuck(opts, warn, *, progress):
+        time.sleep(3)
+        pytest.fail("the deadline did not interrupt the sample")
+
+    config = tmp_path / "trackdir.toml"
+    config.write_text(
+        'interval = "1s"\ndb = "postgresql://x/y_test"\n'
+        f'[[tree]]\nroot = "{ROOTS[0]}"\nmax_depth = 1\n'
+    )
+    out = io.StringIO()
+    status = run(config, stream=out, inspect=lambda c, w: (None,), sample=stuck)
+    assert status == 1
+    errors = [message for level, message in lines(out) if level == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].startswith("cycle did not finish within the interval 1s")
 
 
 def test_walk_progress_is_logged_at_debug_once_per_interval(tmp_path):

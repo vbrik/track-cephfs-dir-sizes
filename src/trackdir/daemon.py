@@ -66,6 +66,10 @@ class _StoppedWhileSampling(Terminated):
         self.root = root
 
 
+class _OverrunLogged(FatalError):
+    """An overrun, logged already when the deadline passed."""
+
+
 class OnceWarner:
     """A warn callback that logs each distinct warning once per daemon run.
 
@@ -215,6 +219,8 @@ def run(
             run_cycles(
                 config, delay, log, warn, sample=sample, clock=clock, sleep=sleep
             )
+    except _OverrunLogged:
+        return 1
     except FatalError as e:
         log.error("%s", e)
         return 1
@@ -241,25 +247,34 @@ def _cycle(
     clock: Callable[[], float],
     seconds: float,
 ) -> None:
-    """Sample every tree in config order; raise Overrun as FatalError after SECONDS."""
+    """Sample every tree in config order; raise FatalError after SECONDS.
+
+    The overrun is logged when SECONDS pass, not after the sample in progress
+    unwinds: its walk waits for running probes, which an unresponsive MDS can
+    hold indefinitely, and the line must not wait with them.
+    """
     current: TreeConfig | None = None  # the tree being sampled
+
+    def overrun_message() -> str:
+        aborting = (
+            ""
+            if current is None
+            else f"; aborting the sample of {current.root}, which stores nothing"
+        )
+        return (
+            f"cycle did not finish within the interval {config.interval.text}"
+            f"{aborting}. Raise interval or sample fewer or smaller trees."
+        )
+
     try:
-        with deadline(seconds):
+        with deadline(seconds, on_expire=lambda: log.error("%s", overrun_message())):
             for tree in config.trees:
                 current = tree
                 result = _sample_tree(config, tree, log, warn, sample, clock)
                 current = None
                 log.info("%s", describe_sample(result))
     except Overrun:
-        aborted = (
-            ""
-            if current is None
-            else f"; sample of {current.root} aborted, nothing was stored for it"
-        )
-        raise FatalError(
-            f"cycle did not finish within the interval {config.interval.text}"
-            f"{aborted}. Raise interval or sample fewer or smaller trees."
-        ) from None
+        raise _OverrunLogged(overrun_message()) from None
     except Terminated as e:
         if current is None:
             raise
