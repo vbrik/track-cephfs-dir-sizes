@@ -8,9 +8,9 @@ import pytest
 from conftest import Terminal, status_lines
 
 from trackdir import walker as walker_module
-from trackdir.model import ROOT, DirProbe, ProbeError, Stage, join
+from trackdir.model import ROOT, DirLimitExceeded, DirProbe, ProbeError, Stage, join
 from trackdir.progress import StatusLine
-from trackdir.walker import DirLimitExceeded, walk
+from trackdir.walker import walk
 
 
 class TreeBackend:

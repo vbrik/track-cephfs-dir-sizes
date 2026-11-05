@@ -34,7 +34,14 @@ from trackdir.db import (
     store_sample,
     tree_key_of,
 )
-from trackdir.model import ROOT, DirProbe, ProbeError, Stage, tree_key
+from trackdir.model import (
+    ROOT,
+    DirLimitExceeded,
+    DirProbe,
+    ProbeError,
+    Stage,
+    tree_key,
+)
 
 SRC = Path(__file__).parent.parent / "src"
 
@@ -319,6 +326,16 @@ def test_load_baseline_returns_latest_state_per_path(db):
         ROOT: (1, None, None, None, None, 20, None, None, None, None, None),
         b"a": (2, None, None, None, None, 20, None, None, None, None, None),
     }
+
+
+def test_load_baseline_stops_past_max_dirs(db):
+    init_schema(db)
+    store(db, DEEP, INITIAL)
+    key = tree_key_of(DEEP)
+    assert len(load_baseline(db, key, max_dirs=len(INITIAL)).rows) == len(INITIAL)
+    with pytest.raises(DirLimitExceeded) as exc:
+        load_baseline(db, key, max_dirs=len(INITIAL) - 1)
+    assert exc.value.limit == len(INITIAL) - 1
 
 
 def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):

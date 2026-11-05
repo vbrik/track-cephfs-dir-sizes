@@ -13,21 +13,21 @@ import queue
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from trackdir.model import ROOT, Backend, DirProbe, ShouldList, join, tree_key
+from trackdir.model import (
+    ROOT,
+    Backend,
+    DirLimitExceeded,
+    DirProbe,
+    ShouldList,
+    join,
+    tree_key,
+)
 from trackdir.progress import NO_PROGRESS, Progress
 
 # Probes submitted per worker thread: enough to keep every worker busy.
 IN_FLIGHT_PER_JOB = 4
 # Seconds between progress reports while no probe completes.
 REPORT_INTERVAL = 1.0
-
-
-class DirLimitExceeded(Exception):
-    """The walk would probe more directories than allowed."""
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(f"more than {limit} directories")
-        self.limit = limit
 
 
 def walk(

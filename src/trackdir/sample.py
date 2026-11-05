@@ -5,11 +5,11 @@ after every directory was deleted) stores every directory; any other
 (incremental) stores only the directories whose state changed since the
 baseline, the tree's current state, and tombstones for deleted ones. Live
 samples and replays run the same steps, each with its own database connection
-or none: a pre-check (schema current, baseline loaded, a replay newer than
-the latest sample) so a doomed run fails before a walk that can take hours;
-the walk, pruned by the baseline, with no connection held; the diff against
-the baseline; the store, in one transaction that fails if another sample was
-stored meanwhile.
+or none: a pre-check (schema current, baseline loaded and within --max-dirs,
+the run newer than the tree's latest sample) so a doomed run fails before a
+walk that can take hours; the walk, pruned by the baseline, with no connection
+held; the diff against the baseline; the store, in one transaction that fails
+if another sample was stored meanwhile.
 """
 
 import time
@@ -47,7 +47,7 @@ from trackdir.live import (
     walk_within,
 )
 from trackdir.messages import FatalError, describe_errors, paragraph
-from trackdir.model import DirProbe, ShouldList, error_counts
+from trackdir.model import DirLimitExceeded, DirProbe, ShouldList, error_counts
 from trackdir.progress import NO_PROGRESS, Progress
 
 # Ends the message of a walk over --max-dirs. Unlike capture's advice it does not
@@ -260,7 +260,7 @@ def _walk_live(
         # falsely; it fails before the walk if the tree's latest sample is
         # dated in the future (clock skew, or another host sampled the tree).
         progress.phase("loading the baseline")
-        baseline = _precheck(opts.dsn, key, datetime.now(UTC))
+        baseline = _precheck(opts, key, datetime.now(UTC))
         walked = walk_live(
             live,
             max_depth=opts.max_depth,
@@ -283,7 +283,7 @@ def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
     key = tree_key_of(replace(capture.header, max_depth=max_depth))
     started = datetime.fromisoformat(capture.header.started)
     progress.phase("loading the baseline")
-    baseline = _precheck(opts.dsn, key, started)
+    baseline = _precheck(opts, key, started)
     clock = time.monotonic()
     header, probes = replay_walk(
         capture, max_depth, opts.max_dirs, should_list_changed(baseline), progress
@@ -307,15 +307,23 @@ def _replay_backend(capture: Capture, max_depth: int) -> ReplayBackend:
         raise FatalError(f"{e}.") from e
 
 
-def _precheck(dsn: str, key: TreeKey, started: datetime) -> Baseline:
+def _precheck(opts: SampleOptions, key: TreeKey, started: datetime) -> Baseline:
     """Return tree KEY's baseline; raise FatalError unless a sample can be stored.
 
-    The schema must be current and STARTED (a replayed capture's, or for a live
-    sample the current time) later than the tree's latest sample. The
-    connection is closed on return.
+    The schema must be current, the baseline within opts.max_dirs (an
+    incremental walk probes only part of the tree, so the walk's own check
+    would miss a tree grown past the limit), and STARTED (a replayed
+    capture's, or for a live sample the current time) later than the tree's
+    latest sample. The connection is closed on return.
     """
-    with database(dsn, NOTHING_STORED) as conn:
+    with database(opts.dsn, NOTHING_STORED) as conn:
         check_schema(conn)
-        baseline = load_baseline(conn, key)
+        try:
+            baseline = load_baseline(conn, key, max_dirs=opts.max_dirs)
+        except DirLimitExceeded as e:
+            raise FatalError(
+                f"the {describe_tree(key)} had more than {e.limit} directories "
+                f"at its latest sample. {SAMPLE_LIMIT_ADVICE}"
+            ) from e
         check_order(baseline, key, started)
     return baseline

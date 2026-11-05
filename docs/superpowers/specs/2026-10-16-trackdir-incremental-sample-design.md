@@ -396,9 +396,11 @@ Verdict:
   set reaches them). Anyone reading current state meanwhile sees the errors.
 - **Memory.** The baseline is a dict of all current paths (about 0.5 KB per
   directory retained, up to about 1.6 GB peak per million while loading;
-  measured, see section 8); it can exceed `--max-dirs` if directories
-  were deleted and the tree has more history than live directories; tombstoned
-  paths are not in the baseline.
+  measured, see section 8). An incremental walk probes only part of the tree,
+  so its `--max-dirs` check misses a tree that grew past the limit after its
+  initial sample. (Amended 2026-11-05: `load_baseline` now stops after
+  `--max-dirs` rows and the sample fails before walking, with the walk's
+  limit advice.)
 - **Large deletions** write one tombstone per baseline descendant in one
   transaction.
 - **A mistyped ROOT** that resolves to a CephFS directory with a new

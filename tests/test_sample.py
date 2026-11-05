@@ -354,6 +354,18 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
     assert row == (res.replayed_from, subtree.header.max_depth)
 
 
+def test_tree_over_max_dirs_fails_before_walking(db, dsn, subtree, monkeypatch):
+    sample.run_db_init(dsn)
+    run_sample(SampleOptions(dsn=dsn, replay=SUBTREE), print)
+    monkeypatch.setattr(sample, "replay_walk", must_not_walk)
+    limit = subtree.header.dirs - 1
+    with pytest.raises(FatalError) as exc:
+        run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_dirs=limit), print)
+    message = collapse(str(exc.value))
+    assert f"more than {limit} directories" in message
+    assert message.endswith(sample.SAMPLE_LIMIT_ADVICE)
+
+
 def test_older_replay_is_refused_before_walking(db, dsn, monkeypatch):
     sample.run_db_init(dsn)
     opts = SampleOptions(dsn=dsn, replay=SUBTREE, max_depth=1)

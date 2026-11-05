@@ -22,6 +22,7 @@ from trackdir.messages import FatalError
 from trackdir.model import (
     ROOT,
     Backend,
+    DirLimitExceeded,
     DirProbe,
     ShouldList,
     error_counts,
@@ -38,7 +39,7 @@ from trackdir.rstats import (
     read_rstats,
 )
 from trackdir.safeopen import SafeRoot, openat2_supported
-from trackdir.walker import DirLimitExceeded, walk
+from trackdir.walker import walk
 
 # Probes stay in memory until the end: ~0.6 KB each (measured), so ~6 GB at
 # the limit. A sample also holds the baseline: ~0.5 GB per million current

@@ -44,6 +44,14 @@ class ProbeError:
 GONE = ProbeError(Stage.OPEN, "ENOENT")
 
 
+class DirLimitExceeded(Exception):
+    """More directories than allowed: found by a walk, or held by a baseline."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"more than {limit} directories")
+        self.limit = limit
+
+
 @dataclass(frozen=True, slots=True)
 class RStats:
     """CephFS recursive statistics of one directory's subtree."""

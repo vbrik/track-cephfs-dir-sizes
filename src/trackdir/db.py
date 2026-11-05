@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from trackdir.baseline import ROW_COLUMNS, Baseline, Row, SampleDiff, row_of
 from trackdir.capture import CaptureHeader
-from trackdir.model import ROOT, DirProbe, path_depth, split
+from trackdir.model import ROOT, DirLimitExceeded, DirProbe, path_depth, split
 
 if TYPE_CHECKING:
     import psycopg
@@ -397,13 +397,17 @@ def check_schema(conn: "psycopg.Connection") -> None:
         _check_version(conn)
 
 
-def load_baseline(conn: "psycopg.Connection", key: TreeKey) -> Baseline:
+def load_baseline(
+    conn: "psycopg.Connection", key: TreeKey, *, max_dirs: int | None = None
+) -> Baseline:
     """Return the baseline of tree KEY: its current state as of its latest sample.
 
     An unknown tree, or one without samples, has an empty baseline. One
     REPEATABLE READ transaction keeps the latest sample and the rows consistent
     with each other; the rows come through a server-side cursor, so they are
-    held in memory once, in the baseline.
+    held in memory once, in the baseline. Raises DirLimitExceeded as soon as
+    more than MAX_DIRS rows are read (None: no limit), so the limit bounds the
+    memory of loading too.
     """
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -425,6 +429,8 @@ def load_baseline(conn: "psycopg.Connection", key: TreeKey) -> Baseline:
                 tree,
             )
             for path, *values in named:
+                if max_dirs is not None and len(rows) == max_dirs:
+                    raise DirLimitExceeded(max_dirs)
                 rows[path] = tuple(values)
     sample_id, started = latest
     return Baseline.build(sample_id, started, rows)
