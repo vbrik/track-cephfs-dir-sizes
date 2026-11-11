@@ -203,8 +203,9 @@ unchanged.
 1. Insert the `sample` row.
 2. `COPY` the changed probes and the deleted paths, with path bytes, into a
    temporary staging table.
-3. Insert the staged paths that `path` lacks; `ON CONFLICT DO NOTHING` keeps
-   the id of a path seen before.
+3. Insert the staged paths that `path` lacks, so a path seen before keeps
+   its id. The tree lock makes a plain anti-join safe, and unlike
+   `ON CONFLICT DO NOTHING` it uses no id for a path that exists.
 4. Insert into `dir_state` from staging joined to `path` and left-joined to
    `current_dir_state`, which supplies `prev_*` and `created`.
 5. Upsert the non-deleted rows into `current_dir_state`; delete the
