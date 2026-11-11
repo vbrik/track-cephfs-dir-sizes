@@ -254,6 +254,7 @@ def sample_result(**changes) -> SampleResult:
         "skipped": 0,
         "skipped_pinned": 0,
         "errors": Counter({("open", "EACCES"): 2}),
+        "baseline_seconds": 0.25,
         "walk_seconds": 1.25,
         "store_seconds": 0.5,
         "replayed_from": None,

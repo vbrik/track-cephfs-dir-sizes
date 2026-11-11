@@ -77,6 +77,9 @@ One run of `trackdir sample` over a tree.
 | `anonymized` | boolean | From an anonymized capture: path components, uids, gids (except 0), `euid`, the fsid and `fs_name` are keyed tokens, and `host` is NULL. |
 | `replayed_from` | text | Absolute path of the replayed capture; NULL for a live sample. |
 | `stored` | timestamptz | When the sample was stored. |
+| `new_dirs`, `modified_dirs`, `deleted_dirs` | bigint | The sample's `dir_state` rows: those with `created`, those with neither `created` nor `deleted`, and tombstones. They always equal a count of its rows, and spare readers that count. |
+| `baseline_seconds` | double precision | Time the run took to load the tree's current state before the walk. |
+| `store_seconds` | double precision | Time the store took, from the start of its transaction to just before the commit. |
 
 ### `path`
 

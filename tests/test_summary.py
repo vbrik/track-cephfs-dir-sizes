@@ -217,6 +217,40 @@ def test_sample_after_whole_tree_was_deleted_is_initial_and_path_reborn_is_new(
     assert tree.root_now.sample_id == back.sample_id
 
 
+def test_tree_whose_root_was_deleted_has_no_current_totals(
+    db, dsn, subtree, initial, tmp_path
+):
+    gone = ProbeError(Stage.OPEN, "ENOENT")
+    replay(dsn, only_root(subtree, tmp_path, "gone", gone), max_depth=DEPTH)
+    (tree,) = summarize(db).tree_stats
+    assert tree.root_now is None
+    assert tree.root_first.sample_id == initial.sample_id
+    assert tree.current_dirs == 0 == current(db)[0]
+
+
+def test_summary_without_growth_reads_no_history(
+    db, dsn, subtree, initial, tmp_path, monkeypatch
+):
+    """Counts and totals come from sample and current_dir_state; of dir_state
+    only ROOT's first row with rstats is read, through the primary key."""
+    import psycopg
+
+    replay(dsn, edit(subtree, tmp_path, "second", 1), max_depth=DEPTH)
+    statements = []
+    real = psycopg.Cursor.execute
+
+    def recording(self, query, *args, **kwargs):
+        statements.append(str(query))
+        return real(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", recording)
+    summarize(db, top=0)
+    reading_history = [s for s in statements if "trackdir.dir_state" in s]
+    assert len(reading_history) == 1
+    assert "LIMIT 1" in reading_history[0]
+    assert "OVER" not in "".join(statements)
+
+
 def test_root_without_rstats_has_no_current_totals(db, dsn, subtree, initial, tmp_path):
     replay(
         dsn,

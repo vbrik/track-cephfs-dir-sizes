@@ -53,7 +53,8 @@
 - The work of a sample depends on the tree's live directories and on what
   changed, never on how much history is stored. Reads that would sort or scan
   a tree's history are avoided by storing what they would compute:
-  `current_dir_state`, and `dir_state`'s `prev_*` and `created`. Such copies
+  `current_dir_state`, `dir_state`'s `prev_*` and `created`, and `sample`'s
+  counts of new, modified and deleted rows. Such copies
   are allowed only where they remove a read of history, and only
   `db.store_sample` writes them, in the transaction that stores the rows;
   a test rebuilds each from `dir_state` (`conftest.assert_invariants`).

@@ -9,6 +9,7 @@ Writes run in one transaction each, so a failure or interrupt stores nothing.
 
 import heapq
 import os
+import time
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -38,7 +39,8 @@ SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
 # Three things repeat what dir_state's history says, so that no reader has to
 # sort it: current_dir_state is each live path's latest row (a tombstone removes
 # the row); a row's prev_* are the rstats of its path's row before the sample
-# (NULL without one, or without rstats there); created says there was none.
+# (NULL without one, or without rstats there); created says there was none;
+# a sample's new_dirs, modified_dirs and deleted_dirs count its rows.
 # store_sample alone derives them, in the transaction that stores the rows.
 DDL = """\
 CREATE SCHEMA trackdir;
@@ -73,7 +75,12 @@ CREATE TABLE trackdir.sample (
     errors           bigint      NOT NULL,  -- dirs with an error
     anonymized       boolean     NOT NULL,
     replayed_from    text,                  -- absolute capture path; NULL for live samples
-    stored           timestamptz NOT NULL DEFAULT now()
+    stored           timestamptz NOT NULL DEFAULT now(),
+    new_dirs         bigint      NOT NULL DEFAULT 0,  -- rows stored with created
+    modified_dirs    bigint      NOT NULL DEFAULT 0,  -- rows neither created nor deleted
+    deleted_dirs     bigint      NOT NULL DEFAULT 0,  -- tombstones stored
+    baseline_seconds double precision NOT NULL,       -- loading the baseline
+    store_seconds    double precision NOT NULL DEFAULT 0  -- the store, up to its commit
 );
 
 CREATE TABLE trackdir.path (
@@ -494,6 +501,7 @@ def store_sample(
     baseline: Baseline,
     diff: SampleDiff,
     replayed_from: str | None,
+    baseline_seconds: float,
 ) -> int:
     """Store a sample of tree KEY, in one transaction; return its id.
 
@@ -505,6 +513,9 @@ def store_sample(
     current state: all of it in proportion to the sample's rows. KEY must be
     HEADER's tree, else ValueError. BASELINE is what DIFF was computed against.
     REPLAYED_FROM is the capture's absolute path, None for a live sample.
+    BASELINE_SECONDS, the time loading BASELINE took, is stored with the
+    sample, as are the time this transaction takes up to its commit and the
+    counts of new, modified and deleted rows.
 
     Raises ConcurrentSample if the tree's latest sample is no longer
     BASELINE's, and OutOfOrderSample (see check_order); nothing is stored.
@@ -516,6 +527,7 @@ def store_sample(
     if key != tree_key_of(header):
         raise ValueError(f"tree {key} is not the tree of the header")
     started = datetime.fromisoformat(header.started)
+    clock = time.monotonic()
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         tree_id = _lock_tree(cur, key)
@@ -526,8 +538,9 @@ def store_sample(
         cur.execute(
             "INSERT INTO trackdir.sample (tree_id, root, rstat_mode, openat2,"
             " jobs, started, finished, euid, host, kernel, trackdir_version,"
-            " dirs, errors, anonymized, replayed_from) VALUES (%s, %s, %s, %s,"
-            " %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            " dirs, errors, anonymized, replayed_from, baseline_seconds)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+            " %s) RETURNING id",
             (
                 tree_id,
                 os.fsencode(header.root),
@@ -544,6 +557,7 @@ def store_sample(
                 header.errors,
                 header.anonymized,
                 replayed_from,
+                baseline_seconds,
             ),
         )
         (sample_id,) = cur.fetchone()
@@ -556,8 +570,20 @@ def store_sample(
             for path in diff.deleted:
                 copy.write_row((path, *gone, True))
         params = {"tree": tree_id, "sample": sample_id}
-        for statement in _APPLY_STAGE:
-            cur.execute(statement, params)
+        # autovacuum never analyzes a temporary table, and a large sample
+        # needs the planner to know its size
+        cur.execute("ANALYZE trackdir_stage")
+        cur.execute(_INSERT_PATHS, params)
+        # Reads the current state as it was before the sample, so it runs
+        # before the statements that change it.
+        new, modified, deleted = cur.execute(_INSERT_STATES, params).fetchone()
+        cur.execute(_UPSERT_CURRENT, params)
+        cur.execute(_DELETE_CURRENT, params)
+        cur.execute(
+            "UPDATE trackdir.sample SET new_dirs = %s, modified_dirs = %s,"
+            " deleted_dirs = %s, store_seconds = %s WHERE id = %s",
+            (new, modified, deleted, time.monotonic() - clock, sample_id),
+        )
     return sample_id
 
 
@@ -571,39 +597,42 @@ _STAGED = ", ".join(f"s.{column}" for column in ROW_COLUMNS)
 _STAGE_PATHS = (
     "trackdir_stage s JOIN trackdir.path p ON p.tree_id = %(tree)s AND p.path = s.path"
 )
-# Moves the staged rows of sample %(sample)s of tree %(tree)s into the tables,
-# under the tree row's lock. The dir_state insert reads the current state as it
-# was before the sample, so it runs before the statements that change it.
-_APPLY_STAGE = (
-    # autovacuum never analyzes a temporary table, and a large sample needs
-    # the planner to know its size
-    "ANALYZE trackdir_stage",
-    # An anti-join, not ON CONFLICT DO NOTHING, which would use up an id for
-    # every path that exists; the lock keeps other inserts of the tree away.
-    """INSERT INTO trackdir.path (tree_id, path)
+# The statements below move the staged rows of sample %(sample)s of tree
+# %(tree)s into the tables, under the tree row's lock.
+#
+# An anti-join, not ON CONFLICT DO NOTHING, which would use up an id for every
+# path that exists; the lock keeps other inserts of the tree away.
+_INSERT_PATHS = """INSERT INTO trackdir.path (tree_id, path)
 SELECT %(tree)s, s.path FROM trackdir_stage s
 WHERE NOT EXISTS (
     SELECT FROM trackdir.path p WHERE p.tree_id = %(tree)s AND p.path = s.path
-)""",
-    f"""INSERT INTO trackdir.dir_state (path_id, sample_id, {", ".join(ROW_COLUMNS)},
-    created, deleted, prev_rbytes, prev_rfiles, prev_rsubdirs)
-SELECT p.id, %(sample)s, {_STAGED}, c.path_id IS NULL, s.deleted,
-       c.rbytes, c.rfiles, c.rsubdirs
-FROM {_STAGE_PATHS}
-LEFT JOIN trackdir.current_dir_state c
-       ON c.tree_id = %(tree)s AND c.path_id = p.id""",
-    f"""INSERT INTO trackdir.current_dir_state
+)"""
+# Returns the sample's counts of new, modified and deleted rows.
+_INSERT_STATES = f"""WITH stored AS (
+    INSERT INTO trackdir.dir_state (path_id, sample_id, {", ".join(ROW_COLUMNS)},
+        created, deleted, prev_rbytes, prev_rfiles, prev_rsubdirs)
+    SELECT p.id, %(sample)s, {_STAGED}, c.path_id IS NULL, s.deleted,
+           c.rbytes, c.rfiles, c.rsubdirs
+    FROM {_STAGE_PATHS}
+    LEFT JOIN trackdir.current_dir_state c
+           ON c.tree_id = %(tree)s AND c.path_id = p.id
+    RETURNING created, deleted
+)
+SELECT count(*) FILTER (WHERE created),
+       count(*) FILTER (WHERE NOT created AND NOT deleted),
+       count(*) FILTER (WHERE deleted)
+FROM stored"""
+_UPSERT_CURRENT = f"""INSERT INTO trackdir.current_dir_state
     (tree_id, path_id, path, sample_id, {", ".join(ROW_COLUMNS)})
 SELECT %(tree)s, p.id, s.path, %(sample)s, {_STAGED}
 FROM {_STAGE_PATHS}
 WHERE NOT s.deleted
 ON CONFLICT (tree_id, path_id) DO UPDATE SET sample_id = EXCLUDED.sample_id,
-    {", ".join(f"{c} = EXCLUDED.{c}" for c in ROW_COLUMNS)}""",
-    """DELETE FROM trackdir.current_dir_state c
+    {", ".join(f"{c} = EXCLUDED.{c}" for c in ROW_COLUMNS)}"""
+_DELETE_CURRENT = """DELETE FROM trackdir.current_dir_state c
 USING trackdir_stage s, trackdir.path p
 WHERE s.deleted AND p.tree_id = %(tree)s AND p.path = s.path
-  AND c.tree_id = %(tree)s AND c.path_id = p.id""",
-)
+  AND c.tree_id = %(tree)s AND c.path_id = p.id"""
 
 
 def summarize(
@@ -617,8 +646,9 @@ def summarize(
     An unknown TREE_ID gives no tree statistics. Each tree lists its RECENT
     newest samples, and the TOP directories with the most own growth since its
     first sample, given 2 samples, and since its second-to-last, given 3; TOP 0
-    skips growth. Telling new rows from modified ones, and so a sample's kind,
-    sorts every dir_state row of the trees; growth reads each tree's current
+    skips growth. Without growth nothing depends on how much history is
+    stored: counts come from the sample rows, totals from the current state
+    and from ROOT's first row with rstats. Growth reads each tree's current
     state, and for each window the earlier rows of the paths changed since. One
     READ ONLY REPEATABLE READ transaction keeps all numbers consistent. Raises
     SchemaMissing or SchemaVersionMismatch unless the schema is current.
@@ -630,7 +660,14 @@ def summarize(
         params = {"tree": tree_id}
         trees = cur.execute(_TREES, params).fetchall()
         samples = _group(cur.execute(_SAMPLES, params))
-        roots = _group(cur.execute(_ROOT_ROWS, {**params, "root": ROOT}))
+        root = {**params, "root": ROOT}
+        roots_now = {row[0]: row[1:] for row in cur.execute(_ROOT_NOW, root)}
+        roots_first = {
+            tree_id: cur.execute(
+                _ROOT_FIRST, {"tree": tree_id, "root": ROOT}
+            ).fetchone()
+            for tree_id, *_ in trees
+        }
         errors = _group(cur.execute(_CURRENT_ERRORS, params))
         growth = {
             tree_id: _growth(cur, tree_id, max_depth, samples.get(tree_id, []), top)
@@ -641,7 +678,8 @@ def summarize(
             tree_id,
             TreeKey(*key),
             samples.get(tree_id, []),
-            roots.get(tree_id, []),
+            roots_now.get(tree_id),
+            roots_first[tree_id],
             errors.get(tree_id, []),
             recent,
             growth[tree_id],
@@ -654,7 +692,8 @@ def summarize(
 # Queries of summarize(); %(tree)s is a tree id or NULL for all trees.
 _COUNTS = """SELECT (SELECT count(*) FROM trackdir.tree),
        (SELECT count(*) FROM trackdir.sample),
-       (SELECT count(*) FROM trackdir.dir_state),
+       (SELECT coalesce(sum(new_dirs + modified_dirs + deleted_dirs), 0)::bigint
+        FROM trackdir.sample),
        (SELECT coalesce(sum(pg_total_relation_size(oid)), 0)::bigint
         FROM pg_class WHERE relnamespace = 'trackdir'::regnamespace AND relkind = 'r')
 """
@@ -663,36 +702,29 @@ _TREES = (
     "SELECT id, cluster_fsid, fs_name, fs_path, max_depth"
     f" FROM trackdir.tree WHERE {_IN_TREE.format(column='id')} ORDER BY id"
 )
-# Each tree's samples, oldest first, with what they stored. A row is new unless
-# the path's previous row, by (started, id), exists and is no tombstone.
-# Columns after tree_id are SampleStats's fields in order, but for kind.
-_SAMPLES = f"""WITH history AS (
-    SELECT d.sample_id, d.deleted,
-           lag(d.deleted) OVER (PARTITION BY d.path_id
-                                ORDER BY s.started, s.id) AS was_deleted
-    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    WHERE {_IN_TREE.format(column="s.tree_id")}
-), stored AS (
-    SELECT sample_id,
-           count(*) FILTER (WHERE NOT deleted AND coalesce(was_deleted, true)) AS new,
-           count(*) FILTER (WHERE NOT deleted AND NOT was_deleted) AS modified,
-           count(*) FILTER (WHERE deleted) AS deleted
-    FROM history GROUP BY sample_id
-)
-SELECT s.tree_id, s.id, s.started, s.finished, s.dirs, s.errors,
-       coalesce(st.new, 0), coalesce(st.modified, 0), coalesce(st.deleted, 0),
-       s.euid, s.host, s.root, s.anonymized, s.replayed_from
-FROM trackdir.sample s LEFT JOIN stored st ON st.sample_id = s.id
-WHERE {_IN_TREE.format(column="s.tree_id")}
-ORDER BY s.tree_id, s.started, s.id
+# Each tree's samples, oldest first, with what they stored. Columns after
+# tree_id are SampleStats's fields in order, but for kind.
+_SAMPLES = f"""SELECT tree_id, id, started, finished, dirs, errors,
+       new_dirs, modified_dirs, deleted_dirs,
+       euid, host, root, anonymized, replayed_from
+FROM trackdir.sample
+WHERE {_IN_TREE.format(column="tree_id")}
+ORDER BY tree_id, started, id
 """
-# ROOT's rows, oldest first; the primary key finds them from ROOT's path id.
-_ROOT_ROWS = f"""SELECT s.tree_id, s.id, d.rbytes, d.rfiles, d.rsubdirs
-FROM trackdir.path p
-JOIN trackdir.dir_state d ON d.path_id = p.id
-JOIN trackdir.sample s ON s.id = d.sample_id
-WHERE p.path = %(root)s AND {_IN_TREE.format(column="p.tree_id")}
-ORDER BY s.tree_id, s.started, s.id
+# ROOT's current row with rstats, per tree: RootTotals's fields after tree_id.
+_ROOT_NOW = f"""SELECT tree_id, sample_id, rbytes, rfiles, rsubdirs
+FROM trackdir.current_dir_state
+WHERE path = %(root)s AND rbytes IS NOT NULL
+  AND {_IN_TREE.format(column="tree_id")}
+"""
+# ROOT's earliest row with rstats in tree %(tree)s. A tree's sample ids are in
+# (started, id) order, so the primary key gives it without a sort.
+_ROOT_FIRST = """SELECT d.sample_id, d.rbytes, d.rfiles, d.rsubdirs
+FROM trackdir.dir_state d
+WHERE d.path_id = (SELECT id FROM trackdir.path
+                   WHERE tree_id = %(tree)s AND path = %(root)s)
+  AND d.rbytes IS NOT NULL
+ORDER BY d.sample_id LIMIT 1
 """
 _CURRENT_ERRORS = f"""SELECT tree_id, error_stage, error_code, count(*)
 FROM trackdir.current_dir_state
@@ -837,12 +869,15 @@ def _tree_stats(
     tree_id: int,
     key: TreeKey,
     samples: list[tuple],
-    roots: list[tuple],
+    root_now: tuple | None,
+    root_first: tuple | None,
     errors: list[tuple],
     recent: int,
     growth: tuple[Growth, ...],
 ) -> TreeStats:
     """Return the statistics of a tree from the rows of summarize's queries.
+
+    ROOT_NOW and ROOT_FIRST are RootTotals's fields, None without such a row.
 
     A sample is initial if no directory was current before it: the running
     count of new minus deleted rows is zero, as the baseline was empty.
@@ -853,10 +888,6 @@ def _tree_stats(
         stat = SampleStats(*row, kind="incremental" if current else "initial")
         current += stat.new - stat.deleted
         stats.append(stat)
-    with_rstats = [RootTotals(*row) for row in roots if row[1] is not None]
-    root_now = None
-    if roots and roots[-1][1] is not None:
-        root_now = RootTotals(*roots[-1])
     return TreeStats(
         id=tree_id,
         key=key,
@@ -865,8 +896,8 @@ def _tree_stats(
         last_started=stats[-1].started if stats else None,
         current_dirs=current,
         current_errors=Counter({(stage, code): n for stage, code, n in errors}),
-        root_now=root_now,
-        root_first=with_rstats[0] if with_rstats else None,
+        root_now=RootTotals(*root_now) if root_now else None,
+        root_first=RootTotals(*root_first) if root_first else None,
         recent=tuple(reversed(stats[-recent:])) if recent else (),
         growth=growth,
     )

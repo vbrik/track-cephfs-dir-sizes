@@ -366,6 +366,10 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
     assert os.path.isabs(res.replayed_from)
     count = db.execute("SELECT count(*) FROM trackdir.dir_state").fetchone()[0]
     assert count == res.dirs
+    assert res.baseline_seconds > 0
+    assert db.execute(
+        "SELECT baseline_seconds, new_dirs FROM trackdir.sample"
+    ).fetchall() == [(res.baseline_seconds, res.dirs)]
     row = db.execute(
         "SELECT s.replayed_from, t.max_depth FROM trackdir.sample s"
         " JOIN trackdir.tree t ON t.id = s.tree_id WHERE s.id = %s",

@@ -93,6 +93,7 @@ def store(
     *,
     baseline: Baseline | None = None,
     replayed_from: str | None = None,
+    baseline_seconds: float = 0.0,
 ) -> int:
     """Store PROBES as a sample of HEADER's tree against BASELINE (default: loaded)."""
     key = tree_key_of(header)
@@ -100,7 +101,9 @@ def store(
         baseline = load_baseline(conn, key)
     started = datetime.fromisoformat(header.started)
     sample_diff = diff(baseline, probes, header.max_depth, started)
-    return store_sample(conn, header, key, baseline, sample_diff, replayed_from)
+    return store_sample(
+        conn, header, key, baseline, sample_diff, replayed_from, baseline_seconds
+    )
 
 
 def read_sample(conn, sample_id) -> list[DirProbe]:
@@ -211,7 +214,7 @@ def test_store_sample_refuses_a_key_of_another_tree():
     empty = diff(Baseline.empty(), (), HEADER.max_depth, T0)
     with pytest.raises(ValueError, match="not the tree of the header"):
         store_sample(
-            None, HEADER, replace(key, max_depth=2), Baseline.empty(), empty, None
+            None, HEADER, replace(key, max_depth=2), Baseline.empty(), empty, None, 0.0
         )
 
 
@@ -462,15 +465,23 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
                 rival.execute(
                     "INSERT INTO trackdir.sample (tree_id, root, rstat_mode,"
                     " openat2, jobs, started, finished, euid, host, kernel,"
-                    " trackdir_version, dirs, errors, anonymized)"
+                    " trackdir_version, dirs, errors, anonymized,"
+                    " baseline_seconds)"
                     " SELECT tree_id, root, rstat_mode, openat2, jobs,"
                     " started + interval '1 minute', finished, euid, host,"
-                    " kernel, trackdir_version, dirs, errors, anonymized"
+                    " kernel, trackdir_version, dirs, errors, anonymized, 0"
                     " FROM trackdir.sample WHERE id = %s",
                     (first_id,),
                 )
                 pending = pool.submit(
-                    store_sample, loser, loser_header, key, baseline, loser_diff, None
+                    store_sample,
+                    loser,
+                    loser_header,
+                    key,
+                    baseline,
+                    loser_diff,
+                    None,
+                    0.0,
                 )
                 _wait_for_lock_wait(db, loser.info.backend_pid)
             # The rival committed; the loser now gets the lock.
@@ -695,3 +706,44 @@ def test_non_utf8_path_round_trips_through_staging(db):
         "SELECT rbytes FROM trackdir.current_dir_state WHERE path = %s", (name,)
     ).fetchone() == (2,)
     assert history(db, name, "prev_rbytes") == [(None,), (1,)]
+
+
+_COUNTS_DIFFER = """SELECT count(*) FROM trackdir.sample s, LATERAL (
+    SELECT count(*) FILTER (WHERE d.created) AS new,
+           count(*) FILTER (WHERE NOT d.created AND NOT d.deleted) AS modified,
+           count(*) FILTER (WHERE d.deleted) AS deleted
+    FROM trackdir.dir_state d WHERE d.sample_id = s.id
+) rows
+WHERE (s.new_dirs, s.modified_dirs, s.deleted_dirs)
+      IS DISTINCT FROM (rows.new, rows.modified, rows.deleted)"""
+
+
+def test_sample_counts_match_its_rows(db):
+    init_schema(db)
+    steps = [dirs(a=1, b=2), dirs(a=5, c=3), dirs(a=5, c=3), dirs(b=1)]
+    ids = [
+        store(db, later(HEADER, 60 * minute), probes)
+        for minute, probes in enumerate(steps)
+    ]
+    assert db.execute(
+        "SELECT new_dirs, modified_dirs, deleted_dirs FROM trackdir.sample"
+        " WHERE id = ANY(%s) ORDER BY id",
+        (ids,),
+    ).fetchall() == [
+        (3, 0, 0),  # ROOT, a, b
+        (1, 2, 1),  # c; ROOT and a; b
+        (0, 0, 0),
+        (1, 1, 2),  # b again; ROOT; a and c
+    ]
+    assert db.execute(_COUNTS_DIFFER).fetchone() == (0,)
+
+
+def test_sample_records_phase_times(db):
+    init_schema(db)
+    sample_id = store(db, HEADER, dirs(a=1), baseline_seconds=1.5)
+    baseline_seconds, store_seconds = db.execute(
+        "SELECT baseline_seconds, store_seconds FROM trackdir.sample WHERE id = %s",
+        (sample_id,),
+    ).fetchone()
+    assert baseline_seconds == 1.5
+    assert 0 < store_seconds < 60

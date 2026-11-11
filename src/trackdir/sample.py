@@ -89,6 +89,7 @@ class SampleResult:
     skipped: int  # unchanged directories not listed: pruned subtrees
     skipped_pinned: int  # of them, those with a pinned rctime
     errors: Counter[tuple[str, str]]  # (stage, code) -> number of directories
+    baseline_seconds: float  # the pre-check, which loads the baseline
     walk_seconds: float
     store_seconds: float
     replayed_from: str | None  # absolute capture path; None for a live sample
@@ -103,7 +104,8 @@ class _Walk:
     key: TreeKey
     baseline: Baseline
     probes: list[DirProbe]
-    seconds: float
+    seconds: float  # of the walk
+    baseline_seconds: float  # of the pre-check, which loads the baseline
 
 
 def replay_walk(
@@ -171,7 +173,13 @@ def run_sample(
     clock = time.monotonic()
     with database(opts.dsn, NOTHING_STORED) as conn:
         sample_id = store_sample(
-            conn, header, walked.key, baseline, sample_diff, replayed_from
+            conn,
+            header,
+            walked.key,
+            baseline,
+            sample_diff,
+            replayed_from,
+            walked.baseline_seconds,
         )
     return SampleResult(
         sample_id=sample_id,
@@ -184,6 +192,7 @@ def run_sample(
         skipped=sample_diff.skipped,
         skipped_pinned=sample_diff.skipped_pinned,
         errors=error_counts(walked.probes),
+        baseline_seconds=walked.baseline_seconds,
         walk_seconds=walked.seconds,
         store_seconds=time.monotonic() - clock,
         replayed_from=replayed_from,
@@ -260,7 +269,9 @@ def _walk_live(
         # falsely; it fails before the walk if the tree's latest sample is
         # dated in the future (clock skew, or another host sampled the tree).
         progress.phase("loading the baseline")
+        clock = time.monotonic()
         baseline = _precheck(opts, key, datetime.now(UTC))
+        baseline_seconds = time.monotonic() - clock
         walked = walk_live(
             live,
             max_depth=opts.max_depth,
@@ -270,7 +281,9 @@ def _walk_live(
             limit_advice=SAMPLE_LIMIT_ADVICE,
             progress=progress,
         )
-    return _Walk(walked.header, key, baseline, walked.probes, walked.elapsed)
+    return _Walk(
+        walked.header, key, baseline, walked.probes, walked.elapsed, baseline_seconds
+    )
 
 
 def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
@@ -283,12 +296,16 @@ def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
     key = tree_key_of(replace(capture.header, max_depth=max_depth))
     started = datetime.fromisoformat(capture.header.started)
     progress.phase("loading the baseline")
+    clock = time.monotonic()
     baseline = _precheck(opts, key, started)
+    baseline_seconds = time.monotonic() - clock
     clock = time.monotonic()
     header, probes = replay_walk(
         capture, max_depth, opts.max_dirs, should_list_changed(baseline), progress
     )
-    return _Walk(header, key, baseline, probes, time.monotonic() - clock)
+    return _Walk(
+        header, key, baseline, probes, time.monotonic() - clock, baseline_seconds
+    )
 
 
 def _load(path: Path) -> Capture:
