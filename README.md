@@ -181,6 +181,13 @@ database whose name does not end in `_test`.
 Any local user can connect to them, so keep real data out of them. A server
 on an address other than loopback needs `--password` (or `TRACKDIR_PG_PASSWORD`).
 
+`scripts/loadtest.py` fills an empty database with a synthetic tree and
+samples of it, with bursts of short-lived directories, and prints what each
+sample cost to load its baseline and to store as the history grows
+(`venv/bin/python scripts/loadtest.py --help`). Use a server of its own for
+it, e.g. `scripts/postgres.py --name pg-load --port 5434 start`: it refuses a
+database that already has a trackdir schema.
+
 ## Documentation
 
 - [docs/terms.md](docs/terms.md): terms used in code and docs.
