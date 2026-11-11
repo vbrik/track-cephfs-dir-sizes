@@ -1,5 +1,7 @@
 # Restricted own growth for `db summary` — Implementation Plan
 
+> **Do not execute as written (2026-11-11).** This plan targets schema version 4. Version 5 (`docs/superpowers/specs/2026-11-11-schema-v5-design.md`) names paths by id and stores each row's previous rstats, so a window's start states are in the window's rows and `_START_ENDS` is no longer needed. Revise the plan for version 5 first.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `trackdir db summary`'s growth costs time and memory in proportion to what changed in each window, not to the size of the tree, and its output stays the same byte for byte. `own_growth` moves out of `db.py` into a pure module that is tested without PostgreSQL.

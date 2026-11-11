@@ -70,7 +70,7 @@ class Baseline:
     to list even if unchanged: those with an error row, and their ancestors.
     children maps a path to the full paths of its subdirectories in rows.
     The rows must be parent-closed (every row's parent directory also has a
-    row), as the current-state view guarantees.
+    row), as the stored current state guarantees.
     """
 
     sample_id: int | None

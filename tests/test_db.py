@@ -10,13 +10,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import SUBTREE
+from conftest import SUBTREE, assert_invariants
 
 from trackdir import db as db_module
 from trackdir.baseline import ROW_COLUMNS, Baseline, diff
 from trackdir.capture import CaptureHeader, load_capture
 from trackdir.db import (
-    DIR_STATE_COLUMNS,
+    STAGE_COLUMNS,
     ConcurrentSample,
     DbError,
     OutOfOrderSample,
@@ -105,10 +105,9 @@ def store(
 
 def read_sample(conn, sample_id) -> list[DirProbe]:
     """Return the non-tombstone rows of SAMPLE_ID as probes in tree order."""
-    columns = ", ".join(("path", *ROW_COLUMNS))
+    columns = ", ".join(("p.path", *(f"d.{c}" for c in ROW_COLUMNS)))
     rows = conn.execute(
-        f"SELECT {columns} FROM trackdir.dir_state"
-        " WHERE sample_id = %s AND NOT deleted",
+        f"SELECT {columns} FROM {NAMED} WHERE d.sample_id = %s AND NOT d.deleted",
         (sample_id,),
     ).fetchall()
     probes = [
@@ -124,11 +123,23 @@ def read_sample(conn, sample_id) -> list[DirProbe]:
 def counts(conn) -> dict[str, int]:
     return {
         table: conn.execute(f"SELECT count(*) FROM trackdir.{table}").fetchone()[0]
-        for table in ("tree", "sample", "dir_state")
+        for table in TABLES
     }
 
 
-NOTHING_STORED = {"tree": 0, "sample": 0, "dir_state": 0}
+TABLES = ("tree", "sample", "path", "dir_state", "current_dir_state")
+NOTHING_STORED = dict.fromkeys(TABLES, 0)
+# dir_state rows with their paths
+NAMED = "trackdir.dir_state d JOIN trackdir.path p ON p.id = d.path_id"
+
+
+def history(conn, path: bytes, *columns: str) -> list[tuple]:
+    """Return COLUMNS of PATH's dir_state rows in all trees, oldest first."""
+    return conn.execute(
+        f"SELECT {', '.join(f'd.{c}' for c in columns)} FROM {NAMED}"
+        " WHERE p.path = %s ORDER BY d.sample_id",
+        (path,),
+    ).fetchall()
 
 
 # Without a database
@@ -136,7 +147,7 @@ NOTHING_STORED = {"tree": 0, "sample": 0, "dir_state": 0}
 
 def test_dir_state_row_full():
     row = dir_state_row(FULL)
-    assert len(row) == len(DIR_STATE_COLUMNS) - 2  # not sample_id, not deleted
+    assert len(row) == len(STAGE_COLUMNS) - 1  # not deleted
     assert row == (b"a/b", 1, 0o40755, 2, 3, 4, 5, 6, 7, 8, None, None)
 
 
@@ -146,7 +157,7 @@ def test_dir_state_row_missing_fields_are_none():
 
 def test_dir_state_row_splits_error():
     probe = DirProbe(b"a", uid=0, error=ProbeError(Stage.OPEN, "EACCES"))
-    row = dict(zip(DIR_STATE_COLUMNS[1:-1], dir_state_row(probe), strict=True))
+    row = dict(zip(STAGE_COLUMNS[:-1], dir_state_row(probe), strict=True))
     assert row["error_stage"] == "open"
     assert type(row["error_stage"]) is str
     assert row["error_code"] == "EACCES"
@@ -157,15 +168,13 @@ def test_dir_state_row_keeps_non_utf8_path():
     assert dir_state_row(DirProbe(b"caf\xe9"))[0] == b"caf\xe9"
 
 
-def test_dir_state_columns_end_with_deleted():
-    assert DIR_STATE_COLUMNS[:2] == ("sample_id", "path")
-    assert DIR_STATE_COLUMNS[2:-1] == ROW_COLUMNS
-    assert DIR_STATE_COLUMNS[-1] == "deleted"
+def test_stage_columns_are_path_row_and_deleted():
+    assert ("path", *ROW_COLUMNS, "deleted") == STAGE_COLUMNS
 
 
 def test_schema_doc_covers_the_ddl():
     doc = (SRC.parent / "docs" / "schema.md").read_text()
-    objects = re.findall(r"CREATE (?:TABLE|VIEW) trackdir\.(\w+)", db_module.DDL)
+    objects = re.findall(r"CREATE TABLE trackdir\.(\w+)", db_module.DDL)
     tables = re.findall(r"^CREATE TABLE .*? \((.*?)^\);", db_module.DDL, re.M | re.S)
     columns = re.findall(r"^    (\w+) ", "".join(tables), re.MULTILINE)
     columns = [c for c in columns if c not in ("PRIMARY", "UNIQUE", "CHECK")]
@@ -224,7 +233,7 @@ def test_import_without_psycopg():
 def test_init_creates_and_is_idempotent(db):
     assert init_schema(db) is True
     assert init_schema(db) is False
-    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(4,)]
+    assert db.execute("SELECT schema_version FROM trackdir.meta").fetchall() == [(5,)]
     check_schema(db)
 
 
@@ -338,7 +347,7 @@ def test_load_baseline_stops_past_max_dirs(db):
     assert exc.value.limit == len(INITIAL) - 1
 
 
-def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):
+def test_tombstone_rows_satisfy_the_check_and_leave_the_current_state(db):
     import psycopg
 
     init_schema(db)
@@ -346,7 +355,7 @@ def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):
     second_id = store(db, later(DEEP, 60), SECOND)
     columns = ", ".join(("deleted", *ROW_COLUMNS))
     tombstone = db.execute(
-        f"SELECT {columns} FROM trackdir.dir_state WHERE sample_id = %s AND path = %s",
+        f"SELECT {columns} FROM {NAMED} WHERE d.sample_id = %s AND p.path = %s",
         (second_id, b"a/b"),
     ).fetchone()
     assert tombstone == (True,) + (None,) * len(ROW_COLUMNS)
@@ -356,13 +365,19 @@ def test_tombstone_rows_satisfy_the_check_and_the_view_hides_them(db):
         (second_id,),
     ).fetchone() == (2, 1)
     current = db.execute("SELECT path FROM trackdir.current_dir_state").fetchall()
-    assert sorted(current) == [(ROOT,), (b"a",)]  # a/b's older row stays hidden
-    with pytest.raises(psycopg.errors.CheckViolation):
-        db.execute(
-            "INSERT INTO trackdir.dir_state (sample_id, path, ino, deleted)"
-            " VALUES (%s, %s, 1, true)",
-            (second_id, b"x"),
-        )
+    assert sorted(current) == [(ROOT,), (b"a",)]  # a/b's row is gone
+    (root_id,) = db.execute(
+        "SELECT id FROM trackdir.path WHERE path = %s", (ROOT,)
+    ).fetchone()
+    third_id = store(db, later(DEEP, 120))
+    for values in ("1, false, true", "NULL, true, true"):  # values; created
+        with pytest.raises(psycopg.errors.CheckViolation):
+            db.execute(
+                "INSERT INTO trackdir.dir_state"
+                " (path_id, sample_id, ino, created, deleted)"
+                f" VALUES (%s, %s, {values})",
+                (root_id, third_id),
+            )
 
 
 def test_deleting_a_sample_with_rows_is_refused(db):
@@ -372,15 +387,20 @@ def test_deleting_a_sample_with_rows_is_refused(db):
     sample_id = store(db, DEEP, INITIAL)
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         db.execute("DELETE FROM trackdir.sample WHERE id = %s", (sample_id,))
-    assert counts(db) == {"tree": 1, "sample": 1, "dir_state": len(INITIAL)}
+    assert counts(db) == {
+        "tree": 1,
+        "sample": 1,
+        "path": len(INITIAL),
+        "dir_state": len(INITIAL),
+        "current_dir_state": len(INITIAL),
+    }
 
 
 def test_a_tree_is_removed_rows_first(db):
     init_schema(db)
     store(db, DEEP, INITIAL)
-    db.execute("DELETE FROM trackdir.dir_state")
-    db.execute("DELETE FROM trackdir.sample")
-    db.execute("DELETE FROM trackdir.tree")
+    for table in ("dir_state", "current_dir_state", "sample", "path", "tree"):
+        db.execute(f"DELETE FROM trackdir.{table}")
     assert counts(db) == NOTHING_STORED
 
 
@@ -456,7 +476,13 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
             # The rival committed; the loser now gets the lock.
             with pytest.raises(ConcurrentSample):
                 pending.result(timeout=10)
-    assert counts(db) == {"tree": 1, "sample": 2, "dir_state": 1}
+    assert counts(db) == {
+        "tree": 1,
+        "sample": 2,
+        "path": 1,
+        "dir_state": 1,
+        "current_dir_state": 1,
+    }
 
 
 def test_initial_sample_racing_an_initial_sample_is_refused(db):
@@ -467,7 +493,13 @@ def test_initial_sample_racing_an_initial_sample_is_refused(db):
     with pytest.raises(ConcurrentSample) as exc:
         store(db, HEADER, [DirProbe(ROOT)], baseline=Baseline.empty())
     assert exc.value.key == key
-    assert counts(db) == {"tree": 1, "sample": 1, "dir_state": 1}
+    assert counts(db) == {
+        "tree": 1,
+        "sample": 1,
+        "path": 1,
+        "dir_state": 1,
+        "current_dir_state": 1,
+    }
 
 
 @pytest.mark.parametrize("seconds", [0, -1])
@@ -538,3 +570,128 @@ def test_interrupt_during_copy_stores_nothing(db, monkeypatch):
         store(db, HEADER, probes)
     assert len(rows) == 5  # the interrupt came during COPY
     assert counts(db) == NOTHING_STORED
+
+
+# What store_sample derives: path ids, previous values, the current state
+
+
+def dirs(**rbytes: int | None) -> list[DirProbe]:
+    """Return ROOT listing one directory per name, each with its RBYTES.
+
+    None leaves the directory out. ROOT's rbytes is their sum, so it changes
+    whenever one of them does.
+    """
+    present = {name.encode(): size for name, size in rbytes.items() if size is not None}
+    root = DirProbe(ROOT, rbytes=sum(present.values()), children=tuple(present))
+    return [root, *(DirProbe(p, rbytes=size) for p, size in present.items())]
+
+
+def test_current_state_and_previous_values_follow_the_history(db):
+    init_schema(db)
+    failing = DirProbe(b"e", error=ProbeError(Stage.RSTATS, "EIO"))
+    steps = [
+        dirs(a=1, b=2),  # new
+        dirs(a=5, b=2),  # modified
+        dirs(a=5),  # deleted
+        dirs(a=5, b=7),  # created again
+        [*dirs(a=5, b=7, e=0)[:-1], failing],  # an error row
+        dirs(a=5, b=7, e=3),  # the error recovered
+    ]
+    for minute, probes in enumerate(steps):
+        store(db, later(HEADER, 60 * minute), probes)
+        assert_invariants(db)
+    assert counts(db)["path"] == 4  # ROOT, a, b, e
+    assert counts(db)["current_dir_state"] == 4
+
+
+def test_recreated_path_keeps_its_id_and_is_created(db):
+    init_schema(db)
+    for minute, probes in enumerate([dirs(a=1), dirs(), dirs(a=9)]):
+        store(db, later(HEADER, 60 * minute), probes)
+    rows = history(db, b"a", "path_id", "created", "deleted", "rbytes", "prev_rbytes")
+    assert len({path_id for path_id, *_ in rows}) == 1
+    assert [row[1:] for row in rows] == [
+        (True, False, 1, None),
+        (False, True, None, 1),
+        (True, False, 9, None),
+    ]
+
+
+def test_tombstone_carries_the_last_known_values(db):
+    init_schema(db)
+    gone = DirProbe(b"a", rbytes=6, rfiles=7, rsubdirs=8)
+    store(db, HEADER, [DirProbe(ROOT, rbytes=6, children=(b"a",)), gone])
+    store(db, later(HEADER, 60), [DirProbe(ROOT, rbytes=0, children=())])
+    columns = ("rbytes", "rfiles", "rsubdirs", "prev_rbytes", "prev_rfiles")
+    assert history(db, b"a", *columns, "prev_rsubdirs")[-1] == (
+        None,
+        None,
+        None,
+        6,
+        7,
+        8,
+    )
+
+
+def test_error_row_gives_unknown_previous_values_but_not_created(db):
+    init_schema(db)
+    failing = DirProbe(b"a", error=ProbeError(Stage.RSTATS, "EIO"))
+    store(db, HEADER, [DirProbe(ROOT, rbytes=0, children=(b"a",)), failing])
+    store(db, later(HEADER, 60), dirs(a=4))
+    assert history(db, b"a", "created", "rbytes", "prev_rbytes") == [
+        (True, None, None),
+        (False, 4, None),
+    ]
+
+
+def test_trees_with_the_same_relative_path_are_separate(db):
+    init_schema(db)
+    other = replace(HEADER, fs_path="/y")
+    store(db, HEADER, dirs(a=1))
+    store(db, other, dirs(a=2))
+    paths = db.execute(
+        "SELECT tree_id, id FROM trackdir.path WHERE path = %s", (b"a",)
+    ).fetchall()
+    assert len({tree for tree, _ in paths}) == len({i for _, i in paths}) == 2
+    store(db, later(HEADER, 60), dirs())  # a is deleted in the first tree only
+    assert_invariants(db)
+    assert load_baseline(db, tree_key_of(HEADER)).rows.keys() == {ROOT}
+    assert load_baseline(db, tree_key_of(other)).rows.keys() == {ROOT, b"a"}
+
+
+def test_two_samples_on_one_connection_and_an_empty_one(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1))
+    empty_id = store(db, later(HEADER, 60), dirs(a=1))
+    store(db, later(HEADER, 120), dirs(a=2))
+    assert history(db, b"a", "rbytes") == [(1,), (2,)]
+    assert db.execute(
+        "SELECT count(*) FROM trackdir.dir_state WHERE sample_id = %s", (empty_id,)
+    ).fetchone() == (0,)
+    stage = db.execute("SELECT to_regclass('pg_temp.trackdir_stage')").fetchone()
+    assert stage == (None,)
+    assert_invariants(db)
+
+
+def test_existing_paths_use_no_new_path_ids(db):
+    init_schema(db)
+    for minute in range(5):
+        store(db, later(HEADER, 60 * minute), dirs(a=minute))
+    assert db.execute("SELECT max(id), count(*) FROM trackdir.path").fetchone() == (
+        2,
+        2,
+    )
+    store(db, later(HEADER, 600), dirs(a=4, b=1))
+    assert db.execute("SELECT max(id) FROM trackdir.path").fetchone() == (3,)
+
+
+def test_non_utf8_path_round_trips_through_staging(db):
+    init_schema(db)
+    name = b"caf\xe9"
+    for minute, size in enumerate((1, 2)):
+        root = DirProbe(ROOT, rbytes=size, children=(name,))
+        store(db, later(HEADER, 60 * minute), [root, DirProbe(name, rbytes=size)])
+    assert db.execute(
+        "SELECT rbytes FROM trackdir.current_dir_state WHERE path = %s", (name,)
+    ).fetchone() == (2,)
+    assert history(db, name, "prev_rbytes") == [(None,), (1,)]

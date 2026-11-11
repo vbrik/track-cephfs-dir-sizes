@@ -9,7 +9,15 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import SUBTREE, collapse, edited_capture, later, must_not_walk, replay
+from conftest import (
+    SUBTREE,
+    assert_invariants,
+    collapse,
+    edited_capture,
+    later,
+    must_not_walk,
+    replay,
+)
 
 from trackdir import sample
 from trackdir.baseline import ROW_COLUMNS, Row, row_of
@@ -56,8 +64,13 @@ def rows_of(capture: Capture) -> dict[bytes, Row]:
     return {path: row_of(probe) for path, probe in capture.probes.items()}
 
 
+# dir_state rows with their paths
+NAMED = "trackdir.dir_state d JOIN trackdir.path p ON p.id = d.path_id"
+
+
 def view(db) -> dict[bytes, Row]:
-    """The current state of all trees, from the view."""
+    """The current state of all trees, checked against the stored history."""
+    assert_invariants(db)
     columns = ", ".join(ROW_COLUMNS)
     cursor = db.execute(f"SELECT path, {columns} FROM trackdir.current_dir_state")
     return {path: tuple(values) for path, *values in cursor}
@@ -67,8 +80,8 @@ def stored(db, sample_id: int) -> dict[bytes, Row]:
     """The rows (not tombstones) that sample SAMPLE_ID stored."""
     columns = ", ".join(ROW_COLUMNS)
     cursor = db.execute(
-        f"SELECT path, {columns} FROM trackdir.dir_state"
-        " WHERE sample_id = %s AND NOT deleted",
+        f"SELECT p.path, {columns} FROM {NAMED}"
+        " WHERE d.sample_id = %s AND NOT d.deleted",
         (sample_id,),
     )
     return {path: tuple(values) for path, *values in cursor}
@@ -77,6 +90,12 @@ def stored(db, sample_id: int) -> dict[bytes, Row]:
 def count(db, table: str, where: str = "true", *params) -> int:
     sql = f"SELECT count(*) FROM trackdir.{table} WHERE {where}"
     return db.execute(sql, params).fetchone()[0]
+
+
+def rows_at(db, path: bytes) -> int:
+    """The number of dir_state rows PATH has."""
+    sql = f"SELECT count(*) FROM {NAMED} WHERE p.path = %s"
+    return db.execute(sql, (path,)).fetchone()[0]
 
 
 def chain(path: bytes) -> list[bytes]:
@@ -162,7 +181,7 @@ def test_deleted_subtree_is_tombstoned_and_hidden(db, dsn, subtree, initial, tmp
     assert view(db) == rows_of(second)
     assert not [p for p in view(db) if p == mid or p.startswith(mid + b"/")]
     for path in (mid, gone[-1]):
-        assert count(db, "dir_state", "path = %s", path) == 2  # state, tombstone
+        assert rows_at(db, path) == 2  # state, tombstone
     assert count(db, "dir_state", "sample_id = %s AND deleted", res.sample_id) == len(
         gone
     )
@@ -195,7 +214,7 @@ def test_recreated_path_gets_an_ordinary_row(db, dsn, subtree, initial, tmp_path
     assert res.changed == path_depth(mid) + 1
     current = view(db)
     assert current[mid] == row_of(third.probes[mid])
-    assert count(db, "dir_state", "path = %s", mid) == 3  # state, tombstone, new
+    assert rows_at(db, mid) == 3  # state, tombstone, new
     assert current == rows_of(third)
     assert not [p for p in current if p.startswith(mid + b"/")]
 
@@ -313,6 +332,7 @@ def test_failed_store_leaves_nothing(db, dsn, subtree, initial, tmp_path):
     assert message.endswith("Nothing was stored.")
     assert count(db, "sample") == 1
     assert count(db, "dir_state") == subtree.header.dirs
+    assert count(db, "path") == subtree.header.dirs
     assert view(db) == before
 
 

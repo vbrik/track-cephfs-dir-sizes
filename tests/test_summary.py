@@ -143,7 +143,7 @@ def test_missing_schema_is_refused(db):
 def test_empty_database(db, dsn):
     sample.run_db_init(dsn)
     stats = summarize(db)
-    assert stats.schema_version == 4
+    assert stats.schema_version == 5
     assert (stats.trees, stats.samples, stats.dir_states) == (0, 0, 0)
     assert stats.bytes_on_disk > 0
     assert stats.tree_stats == ()
@@ -503,7 +503,7 @@ def stats_of(**changes) -> DbStats:
             Growth(since=6, positive_own=0, dirs=()),
         ),
     )
-    return DbStats(4, 1, 2, 144434, 39542784, (replace(tree, **changes),))
+    return DbStats(5, 1, 2, 144434, 39542784, (replace(tree, **changes),))
 
 
 @pytest.mark.parametrize(
@@ -524,7 +524,7 @@ def test_format_bytes(size, text):
 
 def test_render_text():
     assert render_text(stats_of()) == (
-        "Database: schema version 4; 1 tree, 2 samples, 144434 dir_state rows;"
+        "Database: schema version 5; 1 tree, 2 samples, 144434 dir_state rows;"
         " 37.7 MiB on disk\n"
         "\n"
         "Tree 3 (cluster 11111111-2222-4333-8444-555555555555, default filesystem,"
@@ -609,7 +609,7 @@ def test_render_json():
     assert text.endswith("}\n")
     data = json.loads(text)
     assert data["database"] == {
-        "schema_version": 4,
+        "schema_version": 5,
         "trees": 1,
         "samples": 2,
         "dir_states": 144434,
@@ -647,7 +647,7 @@ def test_cli_prints_the_report_on_stdout(initial, dsn, capsys):
     assert main(["db", "summary", "--db", dsn]) == 0
     stdout, stderr = capsys.readouterr()
     assert stderr == ""
-    assert stdout.startswith("Database: schema version 4; 1 tree, 1 sample,")
+    assert stdout.startswith("Database: schema version 5; 1 tree, 1 sample,")
     assert f"\nTree 1 ({tree_identity(initial.tree)})\n" in stdout
 
 

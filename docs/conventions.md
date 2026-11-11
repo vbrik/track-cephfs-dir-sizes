@@ -49,11 +49,22 @@
 - Code reads the database by the [reading rules](schema.md#reading-rules) of
   `docs/schema.md`: `dir_state` rows are stored changes, so a tree's state comes
   from `current_dir_state`. For the same reason samples are not deleted
-  individually (`dir_state.sample_id` has no `ON DELETE CASCADE`), and counts of
-  what a sample stored are counted from its `dir_state` rows, not stored on
-  `sample`.
+  individually (`dir_state.sample_id` has no `ON DELETE CASCADE`).
+- The work of a sample depends on the tree's live directories and on what
+  changed, never on how much history is stored. Reads that would sort or scan
+  a tree's history are avoided by storing what they would compute:
+  `current_dir_state`, and `dir_state`'s `prev_*` and `created`. Such copies
+  are allowed only where they remove a read of history, and only
+  `db.store_sample` writes them, in the transaction that stores the rows;
+  a test rebuilds each from `dir_state` (`conftest.assert_invariants`).
 - A tree's latest sample is the one with the greatest `(started, id)`, in the
-  baseline, the view, the order guard, the stale-baseline check and the summary
-  alike.
+  baseline, the current state, the order guard, the stale-baseline check and
+  the summary alike.
+- Schema version 5 is the first production version. A change to the DDL
+  raises `SCHEMA_VERSION` and adds an upgrade step from the previous
+  version, run by `trackdir db upgrade` in one transaction. trackdir refuses
+  a database at an older version and names that command; it refuses a newer
+  one and asks for a newer trackdir. `db upgrade` is built with the first
+  version-6 change; versions before 5 cannot be upgraded.
 - `docs/schema.md` changes with the DDL; `test_schema_doc_covers_the_ddl`
   checks that it names every table, column and the schema version.

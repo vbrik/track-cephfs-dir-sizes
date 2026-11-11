@@ -260,3 +260,51 @@ def sample_result(**changes) -> SampleResult:
         "kind": "initial",
     }
     return SampleResult(**(fields | changes))
+
+
+_NOT_REBUILT = """WITH latest AS (
+    SELECT DISTINCT ON (d.path_id) d.*
+    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
+    ORDER BY d.path_id, s.started DESC, s.id DESC
+), rebuilt AS (
+    SELECT p.tree_id, l.path_id, p.path, l.sample_id, {columns}
+    FROM latest l JOIN trackdir.path p ON p.id = l.path_id
+    WHERE NOT l.deleted
+), stored AS (
+    SELECT tree_id, path_id, path, sample_id, {columns}
+    FROM trackdir.current_dir_state
+)
+SELECT count(*) FROM (
+    (SELECT * FROM rebuilt EXCEPT SELECT * FROM stored)
+    UNION ALL
+    (SELECT * FROM stored EXCEPT SELECT * FROM rebuilt)
+) differing
+"""
+_BROKEN_CHAIN = """SELECT count(*) FROM (
+    SELECT d.created, d.prev_rbytes, d.prev_rfiles, d.prev_rsubdirs,
+           lag(d.deleted) OVER w AS was_deleted,
+           lag(d.rbytes) OVER w AS was_rbytes,
+           lag(d.rfiles) OVER w AS was_rfiles,
+           lag(d.rsubdirs) OVER w AS was_rsubdirs
+    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
+    WINDOW w AS (PARTITION BY d.path_id ORDER BY s.started, s.id)
+) history
+WHERE created IS DISTINCT FROM coalesce(was_deleted, true)
+   OR prev_rbytes IS DISTINCT FROM was_rbytes
+   OR prev_rfiles IS DISTINCT FROM was_rfiles
+   OR prev_rsubdirs IS DISTINCT FROM was_rsubdirs
+"""
+
+
+def assert_invariants(conn) -> None:
+    """Check what store_sample derives from dir_state against a rebuild.
+
+    current_dir_state is each path's latest row unless that is a tombstone;
+    a row's prev_* are its path's previous row's rstats, and it is created
+    exactly if there is none or it is a tombstone.
+    """
+    from trackdir.baseline import ROW_COLUMNS
+
+    not_rebuilt = _NOT_REBUILT.format(columns=", ".join(ROW_COLUMNS))
+    assert conn.execute(not_rebuilt).fetchone()[0] == 0
+    assert conn.execute(_BROKEN_CHAIN).fetchone()[0] == 0

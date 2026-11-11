@@ -25,16 +25,21 @@ if TYPE_CHECKING:
     import psycopg
 
 SCHEMA = "trackdir"  # the DDL and queries fix this name; it is not a setting
-SCHEMA_VERSION = 4  # of DDL; no migrations exist, a mismatch is fatal
+SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
 
-# The initial-sample spec's section 5 as amended by section 4 of the
-# incremental-sample spec. dir_state holds the rows a sample stored because they
-# changed (tombstones included), not a full listing; current_dir_state is each
-# path's latest row of a tree, hiding deleted paths. Because a sample's rows are
-# not a listing, a sample cannot be deleted on its own: dir_state's foreign key
-# to sample does not cascade, so deleting a sample that has rows fails. A tree is
-# removed by deleting its dir_state rows, then its samples, then the tree row.
-# What a sample stored is counted from its dir_state rows, not kept redundantly.
+# The schema-v5 spec's section 4. path names every directory a tree ever held,
+# once; a path created again keeps its id. dir_state holds the rows a sample
+# stored because they changed (tombstones included), not a full listing. Because
+# a sample's rows are not a listing, a sample cannot be deleted on its own:
+# dir_state's foreign key to sample does not cascade, so deleting a sample that
+# has rows fails. A tree is removed by deleting its dir_state rows, its
+# current_dir_state rows, its samples, its paths, then the tree row.
+#
+# Three things repeat what dir_state's history says, so that no reader has to
+# sort it: current_dir_state is each live path's latest row (a tombstone removes
+# the row); a row's prev_* are the rstats of its path's row before the sample
+# (NULL without one, or without rstats there); created says there was none.
+# store_sample alone derives them, in the transaction that stores the rows.
 DDL = """\
 CREATE SCHEMA trackdir;
 
@@ -71,40 +76,68 @@ CREATE TABLE trackdir.sample (
     stored           timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE trackdir.path (
+    id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tree_id bigint NOT NULL REFERENCES trackdir.tree,
+    path    bytea  NOT NULL,  -- relative to ROOT; '.' is ROOT
+    UNIQUE (tree_id, path)
+);
+
 CREATE TABLE trackdir.dir_state (
-    sample_id   bigint NOT NULL REFERENCES trackdir.sample,
-    path        bytea  NOT NULL,  -- relative to ROOT; '.' is ROOT
+    path_id       bigint  NOT NULL REFERENCES trackdir.path,
+    sample_id     bigint  NOT NULL REFERENCES trackdir.sample,
+    ino           bigint,
+    mode          integer,
+    uid           bigint,
+    gid           bigint,
+    nlink         bigint,
+    rctime        bigint,           -- ns since the epoch
+    rbytes        bigint,
+    rfiles        bigint,
+    rsubdirs      bigint,
+    error_stage   text CHECK (error_stage IN ('open', 'stat', 'rstats', 'readdir')),
+    error_code    text,
+    created       boolean NOT NULL,  -- the path had no current row before the sample
+    deleted       boolean NOT NULL,  -- a tombstone: the path is gone
+    prev_rbytes   bigint,            -- the path's rstats before the sample
+    prev_rfiles   bigint,
+    prev_rsubdirs bigint,
+    PRIMARY KEY (path_id, sample_id),
+    CHECK ((error_stage IS NULL) = (error_code IS NULL)),
+    CHECK (NOT (created AND deleted)),
+    CHECK (NOT deleted OR (ino IS NULL AND mode IS NULL AND uid IS NULL
+        AND gid IS NULL AND nlink IS NULL AND rctime IS NULL AND rbytes IS NULL
+        AND rfiles IS NULL AND rsubdirs IS NULL AND error_stage IS NULL))
+);
+-- Rows are only appended, so they lie in sample order: a small index finds a
+-- window of samples.
+CREATE INDEX dir_state_sample_id ON trackdir.dir_state USING brin (sample_id);
+
+CREATE TABLE trackdir.current_dir_state (
+    tree_id     bigint NOT NULL REFERENCES trackdir.tree,
+    path_id     bigint NOT NULL REFERENCES trackdir.path,
+    path        bytea  NOT NULL,  -- a copy of path.path: a baseline reads no other table
+    sample_id   bigint NOT NULL REFERENCES trackdir.sample,  -- stored this row
     ino         bigint,
     mode        integer,
     uid         bigint,
     gid         bigint,
     nlink       bigint,
-    rctime      bigint,           -- ns since the epoch
+    rctime      bigint,
     rbytes      bigint,
     rfiles      bigint,
     rsubdirs    bigint,
-    error_stage text CHECK (error_stage IN ('open', 'stat', 'rstats', 'readdir')),
+    error_stage text,
     error_code  text,
-    deleted     boolean NOT NULL DEFAULT false,  -- a tombstone: the path is gone
-    PRIMARY KEY (sample_id, path),
-    CHECK ((error_stage IS NULL) = (error_code IS NULL)),
-    CHECK (NOT deleted OR (ino IS NULL AND mode IS NULL AND uid IS NULL
-        AND gid IS NULL AND nlink IS NULL AND rctime IS NULL AND rbytes IS NULL
-        AND rfiles IS NULL AND rsubdirs IS NULL AND error_stage IS NULL))
+    PRIMARY KEY (tree_id, path_id)
 );
-
-CREATE VIEW trackdir.current_dir_state AS
-SELECT * FROM (
-    SELECT DISTINCT ON (s.tree_id, d.path) s.tree_id, d.*
-    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    ORDER BY s.tree_id, d.path, s.started DESC, s.id DESC
-) latest
-WHERE NOT deleted;
+CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
+    WHERE error_stage IS NOT NULL;
 """  # noqa: E501
 
-# dir_state columns in COPY order; dir_state_row() gives those between
-# sample_id and deleted.
-DIR_STATE_COLUMNS = ("sample_id", "path", *ROW_COLUMNS, "deleted")
+# The staging table's columns in COPY order; dir_state_row() gives all but
+# deleted.
+STAGE_COLUMNS = ("path", *ROW_COLUMNS, "deleted")
 
 # Matches a tree by key, in _key_params() order. fs_name is NULL for the default
 # filesystem, which "=" would never match.
@@ -113,7 +146,7 @@ _TREE_MATCH = (
     " AND max_depth = %s"
 )
 
-# The latest sample of tree %s: the greatest (started, id), as in the view.
+# The latest sample of tree %s: the greatest (started, id).
 _LATEST_SAMPLE = (
     "SELECT id, started FROM trackdir.sample WHERE tree_id = %s"
     " ORDER BY started DESC, id DESC LIMIT 1"
@@ -307,15 +340,15 @@ def tree_key_of(header: CaptureHeader) -> TreeKey:
 
 
 def dir_state_row(probe: DirProbe) -> tuple:
-    """Return PROBE's values for DIR_STATE_COLUMNS[1:-1]; unknown values are None."""
+    """Return PROBE's values for STAGE_COLUMNS[:-1]; unknown values are None."""
     return (probe.path, *row_of(probe))
 
 
 def check_order(baseline: Baseline, key: TreeKey, started: datetime) -> None:
     """Raise OutOfOrderSample unless STARTED is later than BASELINE's sample.
 
-    The current-state view orders a tree's samples by started, so a sample
-    that started earlier than the latest would not supersede it. BASELINE is
+    A tree's samples are ordered by started, so a sample that started earlier
+    than the latest must not replace its rows in the current state. BASELINE is
     tree KEY's; an empty baseline accepts any time.
     """
     if baseline.started is not None and started <= baseline.started:
@@ -402,7 +435,9 @@ def load_baseline(
 ) -> Baseline:
     """Return the baseline of tree KEY: its current state as of its latest sample.
 
-    An unknown tree, or one without samples, has an empty baseline. One
+    It reads the tree's current_dir_state rows, so it costs in proportion to
+    the tree's live directories, whatever history is stored. An unknown tree,
+    or one without samples, has an empty baseline. One
     REPEATABLE READ transaction keeps the latest sample and the rows consistent
     with each other; the rows come through a server-side cursor, so they are
     held in memory once, in the baseline. Raises DirLimitExceeded as soon as
@@ -464,9 +499,11 @@ def store_sample(
 
     The sample row comes from HEADER (dirs and errors count the probed
     directories; its max_depth is the tree's, so not stored again); its
-    dir_state rows, loaded with COPY, are DIFF's changed probes and a
-    tombstone per deleted path. KEY must be HEADER's tree, else
-    ValueError. BASELINE is what DIFF was computed against.
+    dir_state rows are DIFF's changed probes and a tombstone per deleted path.
+    They are loaded with COPY into a temporary table, from which SQL gives
+    new paths an id, adds each row's previous rstats and updates the tree's
+    current state: all of it in proportion to the sample's rows. KEY must be
+    HEADER's tree, else ValueError. BASELINE is what DIFF was computed against.
     REPLAYED_FROM is the capture's absolute path, None for a live sample.
 
     Raises ConcurrentSample if the tree's latest sample is no longer
@@ -510,14 +547,63 @@ def store_sample(
             ),
         )
         (sample_id,) = cur.fetchone()
-        columns = ", ".join(DIR_STATE_COLUMNS)
+        cur.execute(_CREATE_STAGE)
+        columns = ", ".join(STAGE_COLUMNS)
         gone = (None,) * len(ROW_COLUMNS)
-        with cur.copy(f"COPY trackdir.dir_state ({columns}) FROM STDIN") as copy:
+        with cur.copy(f"COPY trackdir_stage ({columns}) FROM STDIN") as copy:
             for probe in diff.changed:
-                copy.write_row((sample_id, *dir_state_row(probe), False))
+                copy.write_row((*dir_state_row(probe), False))
             for path in diff.deleted:
-                copy.write_row((sample_id, path, *gone, True))
+                copy.write_row((path, *gone, True))
+        params = {"tree": tree_id, "sample": sample_id}
+        for statement in _APPLY_STAGE:
+            cur.execute(statement, params)
     return sample_id
+
+
+# What a sample stores, in a temporary table that its transaction drops.
+_CREATE_STAGE = """CREATE TEMPORARY TABLE trackdir_stage (
+    path bytea NOT NULL, ino bigint, mode integer, uid bigint, gid bigint,
+    nlink bigint, rctime bigint, rbytes bigint, rfiles bigint, rsubdirs bigint,
+    error_stage text, error_code text, deleted boolean NOT NULL
+) ON COMMIT DROP"""
+_STAGED = ", ".join(f"s.{column}" for column in ROW_COLUMNS)
+_STAGE_PATHS = (
+    "trackdir_stage s JOIN trackdir.path p ON p.tree_id = %(tree)s AND p.path = s.path"
+)
+# Moves the staged rows of sample %(sample)s of tree %(tree)s into the tables,
+# under the tree row's lock. The dir_state insert reads the current state as it
+# was before the sample, so it runs before the statements that change it.
+_APPLY_STAGE = (
+    # autovacuum never analyzes a temporary table, and a large sample needs
+    # the planner to know its size
+    "ANALYZE trackdir_stage",
+    # An anti-join, not ON CONFLICT DO NOTHING, which would use up an id for
+    # every path that exists; the lock keeps other inserts of the tree away.
+    """INSERT INTO trackdir.path (tree_id, path)
+SELECT %(tree)s, s.path FROM trackdir_stage s
+WHERE NOT EXISTS (
+    SELECT FROM trackdir.path p WHERE p.tree_id = %(tree)s AND p.path = s.path
+)""",
+    f"""INSERT INTO trackdir.dir_state (path_id, sample_id, {", ".join(ROW_COLUMNS)},
+    created, deleted, prev_rbytes, prev_rfiles, prev_rsubdirs)
+SELECT p.id, %(sample)s, {_STAGED}, c.path_id IS NULL, s.deleted,
+       c.rbytes, c.rfiles, c.rsubdirs
+FROM {_STAGE_PATHS}
+LEFT JOIN trackdir.current_dir_state c
+       ON c.tree_id = %(tree)s AND c.path_id = p.id""",
+    f"""INSERT INTO trackdir.current_dir_state
+    (tree_id, path_id, path, sample_id, {", ".join(ROW_COLUMNS)})
+SELECT %(tree)s, p.id, s.path, %(sample)s, {_STAGED}
+FROM {_STAGE_PATHS}
+WHERE NOT s.deleted
+ON CONFLICT (tree_id, path_id) DO UPDATE SET sample_id = EXCLUDED.sample_id,
+    {", ".join(f"{c} = EXCLUDED.{c}" for c in ROW_COLUMNS)}""",
+    """DELETE FROM trackdir.current_dir_state c
+USING trackdir_stage s, trackdir.path p
+WHERE s.deleted AND p.tree_id = %(tree)s AND p.path = s.path
+  AND c.tree_id = %(tree)s AND c.path_id = p.id""",
+)
 
 
 def summarize(
@@ -578,11 +664,11 @@ _TREES = (
     f" FROM trackdir.tree WHERE {_IN_TREE.format(column='id')} ORDER BY id"
 )
 # Each tree's samples, oldest first, with what they stored. A row is new unless
-# the path's previous row (in the view's order) exists and is no tombstone.
+# the path's previous row, by (started, id), exists and is no tombstone.
 # Columns after tree_id are SampleStats's fields in order, but for kind.
 _SAMPLES = f"""WITH history AS (
     SELECT d.sample_id, d.deleted,
-           lag(d.deleted) OVER (PARTITION BY s.tree_id, d.path
+           lag(d.deleted) OVER (PARTITION BY d.path_id
                                 ORDER BY s.started, s.id) AS was_deleted
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
     WHERE {_IN_TREE.format(column="s.tree_id")}
@@ -600,11 +686,12 @@ FROM trackdir.sample s LEFT JOIN stored st ON st.sample_id = s.id
 WHERE {_IN_TREE.format(column="s.tree_id")}
 ORDER BY s.tree_id, s.started, s.id
 """
-# ROOT's rows, oldest first; the primary key finds each from its sample.
+# ROOT's rows, oldest first; the primary key finds them from ROOT's path id.
 _ROOT_ROWS = f"""SELECT s.tree_id, s.id, d.rbytes, d.rfiles, d.rsubdirs
-FROM trackdir.sample s
-JOIN trackdir.dir_state d ON d.sample_id = s.id AND d.path = %(root)s
-WHERE {_IN_TREE.format(column="s.tree_id")}
+FROM trackdir.path p
+JOIN trackdir.dir_state d ON d.path_id = p.id
+JOIN trackdir.sample s ON s.id = d.sample_id
+WHERE p.path = %(root)s AND {_IN_TREE.format(column="p.tree_id")}
 ORDER BY s.tree_id, s.started, s.id
 """
 _CURRENT_ERRORS = f"""SELECT tree_id, error_stage, error_code, count(*)
@@ -620,15 +707,16 @@ WHERE tree_id = %(tree)s
 # Each path with a row in samples %(later)s, with its latest row in samples
 # %(earlier)s, oldest first: rbytes, error stage and deleted, or NULLs if none.
 _START_ENDS = """WITH later AS (
-    SELECT DISTINCT path FROM trackdir.dir_state WHERE sample_id = ANY(%(later)s)
+    SELECT DISTINCT path_id FROM trackdir.dir_state WHERE sample_id = ANY(%(later)s)
 )
-SELECT l.path, b.rbytes, b.error_stage, b.deleted
-FROM later l LEFT JOIN (
-    SELECT DISTINCT ON (d.path) d.path, d.rbytes, d.error_stage, d.deleted
+SELECT p.path, b.rbytes, b.error_stage, b.deleted
+FROM later l JOIN trackdir.path p ON p.id = l.path_id LEFT JOIN (
+    SELECT DISTINCT ON (d.path_id) d.path_id, d.rbytes, d.error_stage, d.deleted
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    WHERE d.sample_id = ANY(%(earlier)s) AND d.path IN (SELECT path FROM later)
-    ORDER BY d.path, s.started DESC, s.id DESC
-) b USING (path)
+    WHERE d.sample_id = ANY(%(earlier)s)
+      AND d.path_id IN (SELECT path_id FROM later)
+    ORDER BY d.path_id, s.started DESC, s.id DESC
+) b ON b.path_id = l.path_id
 """
 # Error stages that leave a directory's subdirectories unread (capture.is_listed)
 _UNLISTING = frozenset({"open", "stat", "readdir"})

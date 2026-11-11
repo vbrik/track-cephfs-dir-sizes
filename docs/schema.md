@@ -5,9 +5,11 @@ The PostgreSQL schema `trackdir`, for tools that read the database. The DDL in
 
 ## Versioning
 
-Table `meta` has one row, `schema_version` (currently 4). Check it before
-reading: there are no migrations, and any version may rename, drop or change
-columns. trackdir itself refuses a database at another version.
+Table `meta` has one row, `schema_version` (currently 5). Check it before
+reading: trackdir refuses a database at another version. Version 5 is the
+first production version; version 4 and earlier cannot be migrated. From
+version 5 on, every change ships an upgrade step (see
+[conventions](conventions.md)).
 
 ## Reading rules
 
@@ -15,8 +17,18 @@ columns. trackdir itself refuses a database at another version.
   directory only if it is new or differs from its previous row, plus a
   tombstone (`deleted`) for each directory that disappeared. A directory with
   no row in a sample is unchanged, not missing.
-- **Read current state from `current_dir_state`**, never from one sample's
-  `dir_state` rows.
+- **Read current state from `current_dir_state`**, a table of the directories
+  that exist now, never from one sample's `dir_state` rows.
+- **A path needs its tree.** `dir_state` names a directory by `path_id`; table
+  `path` gives its bytes and its tree. Trees may overlap, and the same
+  relative path can exist in several, each with its own id and history. A
+  path deleted and created again keeps its id.
+- **Each row says what it replaced.** `prev_rbytes`, `prev_rfiles` and
+  `prev_rsubdirs` are the directory's rstats before the sample, so the change
+  over a window of samples is its last row's value minus its first row's
+  `prev_` value: no row outside the window is needed. `created` tells a
+  directory that did not exist before from one whose earlier rstats are
+  unknown; both have NULL `prev_` values.
 - **A tree's samples are ordered by `(started, id)`**; the latest has the
   greatest. trackdir stores a sample only if it started after the tree's
   latest, so `id` order agrees.
@@ -66,14 +78,28 @@ One run of `trackdir sample` over a tree.
 | `replayed_from` | text | Absolute path of the replayed capture; NULL for a live sample. |
 | `stored` | timestamptz | When the sample was stored. |
 
-### `dir_state`
+### `path`
 
-One directory's state as one sample stored it. Primary key `(sample_id, path)`.
+Every directory a tree has ever held, once. Rows are only added. `tree_id`
+and `path` are unique together.
 
 | Column | Type | Meaning |
 |---|---|---|
-| `sample_id` | bigint | The sample (`sample.id`). |
+| `id` | bigint | Primary key: the path id. |
+| `tree_id` | bigint | The tree (`tree.id`). |
 | `path` | bytea | Relative to ROOT, components joined by `/`; `.` is ROOT. Depth is the number of components. |
+
+### `dir_state`
+
+One directory's state as one sample stored it. Primary key
+`(path_id, sample_id)`, so a directory's history is one index range. Rows are
+only added, in sample order; a block-range index on `sample_id` finds the
+rows of a window of samples.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `path_id` | bigint | The directory (`path.id`). |
+| `sample_id` | bigint | The sample (`sample.id`). |
 | `ino` | bigint | Inode number. |
 | `mode` | integer | `st_mode`, including the file type bits (e.g. 16877 is `drwxr-xr-x`). |
 | `uid`, `gid` | bigint | Owner and group. |
@@ -84,7 +110,9 @@ One directory's state as one sample stored it. Primary key `(sample_id, path)`.
 | `rsubdirs` | bigint | Directories in the subtree, counting this one. |
 | `error_stage` | text | Step that failed: `open`, `stat`, `rstats` or `readdir`; NULL without an error. |
 | `error_code` | text | errno name (e.g. `EACCES`; `errno<N>` for an unnamed one, `EUNKNOWN` without one), `DIRSTAT_STALE` or `PARSE`; set exactly when `error_stage` is. |
-| `deleted` | boolean | A tombstone: the directory is gone as of this sample. Every other column but the key is NULL. |
+| `created` | boolean | The directory had no current row before the sample: it is new, or was deleted earlier. Never true for a tombstone. |
+| `deleted` | boolean | A tombstone: the directory is gone as of this sample. Every column from `ino` to `error_code` is NULL. |
+| `prev_rbytes`, `prev_rfiles`, `prev_rsubdirs` | bigint | The directory's `rbytes`, `rfiles` and `rsubdirs` in its current row before the sample; NULL if it had none (`created`) or that row had no rstats. A tombstone carries the last known values, so it says how much was deleted. |
 
 A value that could not be read is NULL, and the error columns say why: `open`
 and `stat` errors usually leave everything NULL (an `open` EACCES keeps the
@@ -96,17 +124,23 @@ rstats cover the directory's whole subtree, including levels below
 `max_depth`. CephFS propagates them upward with a delay, so a parent can lag
 behind its children within one sample.
 
-## View `current_dir_state`
+### `current_dir_state`
 
-Each path's latest `dir_state` row in its tree, by the sample's
-`(started, id)`, without tombstoned paths: the tree as of its latest sample.
-Columns are `tree_id` followed by those of `dir_state`.
+The directories that exist as of each tree's latest sample: every path's
+latest `dir_state` row, unless that is a tombstone. Primary key
+`(tree_id, path_id)`. trackdir keeps it up to date in the transaction that
+stores a sample; it holds nothing that `dir_state` does not.
 
-The view is computed on every read by sorting the tree's stored rows; there
-are no indexes beyond the primary keys. Conditions on `tree_id` and `path`
-are applied before that sort, so reading a few paths is fast; any other
-condition (e.g. `error_stage IS NOT NULL`) applies after it, so the whole
-tree is sorted.
+| Column | Type | Meaning |
+|---|---|---|
+| `tree_id` | bigint | The tree (`tree.id`). |
+| `path_id` | bigint | The directory (`path.id`). |
+| `path` | bytea | The directory's path, as in `path`. |
+| `sample_id` | bigint | The sample that stored this state: the latest in which the directory changed. |
+| `ino` to `error_code` | | As in `dir_state`. |
+
+An index on `tree_id` restricted to rows with an error finds a tree's
+current errors without reading the tree.
 
 ## Example queries
 
@@ -122,22 +156,56 @@ changed, so the value holds until the next row:
 
 ```sql
 SELECT s.started, d.rbytes, d.deleted
-FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-WHERE s.tree_id = 1 AND d.path = convert_to('proj/2019', 'UTF8')
+FROM trackdir.path p
+JOIN trackdir.dir_state d ON d.path_id = p.id
+JOIN trackdir.sample s ON s.id = d.sample_id
+WHERE p.tree_id = 1 AND p.path = convert_to('proj/2019', 'UTF8')
 ORDER BY s.started, s.id;
 ```
 
-A tree as of sample 7, built as the view is but ignoring later samples:
+What changed in tree 1 since a moment, with each directory's growth. The
+first row of a directory in the window holds its size before the window, the
+last its size now; a directory created in the window grew from 0:
 
 ```sql
-SELECT * FROM (
-    SELECT DISTINCT ON (d.path) d.*
+SELECT DISTINCT p.path,
+       last_value(d.rbytes) OVER w
+       - coalesce(first_value(d.prev_rbytes) OVER w, 0) AS grew,
+       first_value(d.created) OVER w AS created,
+       last_value(d.deleted) OVER w AS deleted
+FROM trackdir.sample s
+JOIN trackdir.dir_state d ON d.sample_id = s.id
+JOIN trackdir.path p ON p.id = d.path_id
+WHERE s.tree_id = 1 AND s.started >= now() - interval '7 days'
+WINDOW w AS (PARTITION BY d.path_id ORDER BY s.started, s.id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+```
+
+`grew` is NULL for a deleted directory (`prev_rbytes` of its tombstone is
+what was deleted) and wherever rstats were not read.
+
+A tree as of sample 7, ignoring later samples:
+
+```sql
+SELECT p.path, asof.* FROM (
+    SELECT DISTINCT ON (d.path_id) d.*
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
     WHERE s.tree_id = 1
       AND (s.started, s.id) <= (SELECT started, id FROM trackdir.sample WHERE id = 7)
-    ORDER BY d.path, s.started DESC, s.id DESC
-) asof
-WHERE NOT deleted;
+    ORDER BY d.path_id, s.started DESC, s.id DESC
+) asof JOIN trackdir.path p ON p.id = asof.path_id
+WHERE NOT asof.deleted;
+```
+
+Each directory's absolute path inside its filesystem, to compare trees that
+overlap:
+
+```sql
+SELECT t.id AS tree_id, p.id AS path_id,
+       CASE WHEN p.path = convert_to('.', 'UTF8') THEN t.fs_path
+            WHEN t.fs_path = convert_to('/', 'UTF8') THEN '\x2f'::bytea || p.path
+            ELSE t.fs_path || '\x2f'::bytea || p.path END AS fs_dir
+FROM trackdir.path p JOIN trackdir.tree t ON t.id = p.tree_id;
 ```
 
 ## Access
@@ -165,7 +233,9 @@ rows first, while nothing samples it:
 BEGIN;
 DELETE FROM trackdir.dir_state
 WHERE sample_id IN (SELECT id FROM trackdir.sample WHERE tree_id = 3);
+DELETE FROM trackdir.current_dir_state WHERE tree_id = 3;
 DELETE FROM trackdir.sample WHERE tree_id = 3;
+DELETE FROM trackdir.path WHERE tree_id = 3;
 DELETE FROM trackdir.tree WHERE id = 3;
 COMMIT;
 ```
