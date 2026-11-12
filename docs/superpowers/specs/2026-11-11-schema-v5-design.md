@@ -263,6 +263,24 @@ is stored, and the client sends the same data as today. Every step costs in
 proportion to the sample's rows, with the exception measured in section 3: a
 sample of very many rows is joined to `path` by reading all of it.
 
+**Planner statistics** (added 2026-11-12, after a manual check on a real
+mount). The statistics PostgreSQL plans with describe the trees present when
+they were gathered. For a tree added later they say it has no rows, and the
+store's joins were planned for one row: a nested loop that made the first
+sample of a second tree quadratic (7 minutes for 72,017 directories, 2 s once
+fixed). The load test missed it: it had one tree. Three measures:
+
+- a sample that inserts 1000 or more paths runs `ANALYZE` on `path` before
+  the joins that read it, and on `current_dir_state` after the upsert;
+- the delete of tombstoned paths is skipped when there are none;
+- both tables are set to be analyzed by autovacuum after 1000 changed rows
+  instead of after changes to a tenth of the table, which covers trees that
+  grow in smaller steps.
+
+`ANALYZE` reads a sample of a table, so this adds a fraction of a second to
+such a sample whatever the table's size; it holds a lock until the store
+commits, so two large stores of different trees take turns.
+
 **Removing a tree** deletes its `dir_state` rows (through its samples), its
 `current_dir_state` rows, its samples, its paths, then the tree row.
 `docs/schema.md` gives the statements.

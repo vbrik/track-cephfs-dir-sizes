@@ -155,6 +155,18 @@ stores a sample; it holds nothing that `dir_state` does not.
 An index on `tree_id` restricted to rows with an error finds a tree's
 current errors without reading the tree.
 
+### Planner statistics
+
+trackdir's own queries join `path` and `current_dir_state` by tree, and
+PostgreSQL plans them from statistics that describe the trees present when
+they were gathered. A tree added or grown since then looks empty, and a
+query on it can be planned badly enough to take hours. So `db init` sets
+both tables to have their statistics refreshed by autovacuum after 1000
+changed rows, not after changes to a tenth of the table, and a sample that
+adds 1000 or more directories runs `ANALYZE` on them itself. Keep autovacuum
+enabled. If you load or change these tables by other means, run `ANALYZE` on
+them afterwards.
+
 ## Example queries
 
 The examples name a tree by its id, here 1. Get it from the tree's name:

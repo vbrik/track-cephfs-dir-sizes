@@ -63,6 +63,12 @@
   are allowed only where they remove a read of history, and only
   `db.store_sample` writes them, in the transaction that stores the rows;
   a test rebuilds each from `dir_state` (`conftest.assert_invariants`).
+- Queries that join `path` or `current_dir_state` by tree depend on the
+  planner knowing the tree's size. `db.store_sample` runs `ANALYZE` after it
+  adds `db.ANALYZE_AFTER` paths or more, and the DDL makes autovacuum do so
+  after as many changed rows. Test a new such query on a database that holds
+  another tree and has been analyzed before the tree under test existed:
+  without statistics, or with one tree, a bad plan does not show.
 - A tree is told from another in one place, `db._resolve_tree`, which checks
   a tree name against a mount identity (`db.TreeKey`). No other code compares
   names in place of mount identities or looks a tree up by one of them alone

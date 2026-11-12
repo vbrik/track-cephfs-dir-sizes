@@ -1148,3 +1148,20 @@ def test_first_sample_of_a_second_tree_is_not_planned_for_an_empty_tree(db):
     store(db, replace(HEADER, fs_path="/y"), many(20_000))
     assert time.monotonic() - clock < 10
     assert_invariants(db)
+
+
+@pytest.mark.parametrize("table", ["path", "current_dir_state"])
+def test_statistics_of_the_joined_tables_are_refreshed_by_changes_not_by_share(
+    db, table
+):
+    """autovacuum analyzes by default after changes to 10% of a table, which
+    on a large one leaves a small new tree unknown to the planner for long."""
+    init_schema(db)
+    (options,) = db.execute(
+        "SELECT reloptions FROM pg_class WHERE oid = %s::regclass",
+        (f"trackdir.{table}",),
+    ).fetchone()
+    assert sorted(options) == [
+        "autovacuum_analyze_scale_factor=0",
+        f"autovacuum_analyze_threshold={db_module.ANALYZE_AFTER}",
+    ]

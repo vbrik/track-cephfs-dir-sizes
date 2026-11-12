@@ -34,6 +34,12 @@ TREE_NAME_RULE = (
     "1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-', the first a letter or digit"
 )
 
+# A sample that adds at least this many paths refreshes the planner's
+# statistics of the tables it joins (see store_sample), and autovacuum does so
+# after this many changed rows (see the DDL). Below it a misplanned join costs
+# little: a million comparisons at this size.
+ANALYZE_AFTER = 1000
+
 SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
 
 # The schema-v5 spec's section 4. path names every directory a tree ever held,
@@ -152,12 +158,19 @@ CREATE TABLE trackdir.current_dir_state (
 );
 CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
     WHERE error_stage IS NOT NULL;
-""".replace("TREE_NAME", TREE_NAME.pattern)  # noqa: E501
 
-# A sample that adds at least this many paths refreshes the planner's
-# statistics of the tables it joins (see store_sample). Below it a misplanned
-# join costs little: a million comparisons at this size.
-ANALYZE_AFTER = 1000
+-- store_sample joins these two by tree. By default autovacuum refreshes a
+-- table's statistics after changes to a tenth of it, which on a large table
+-- leaves a new or growing tree unknown to the planner for a long time, and
+-- its samples planned as if it had no rows. Refresh after a fixed number of
+-- changed rows instead.
+ALTER TABLE trackdir.path SET
+    (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ANALYZE_AFTER);
+ALTER TABLE trackdir.current_dir_state SET
+    (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ANALYZE_AFTER);
+""".replace("TREE_NAME", TREE_NAME.pattern).replace(  # noqa: E501
+    "ANALYZE_AFTER", str(ANALYZE_AFTER)
+)
 
 # The staging table's columns in COPY order; dir_state_row() gives all but
 # deleted.
