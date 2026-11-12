@@ -122,21 +122,47 @@ def _db_message(e: DbError, unchanged: str) -> str:
 
 def _differences(recorded: TreeKey, found: TreeKey) -> str:
     """Return how FOUND differs from RECORDED, e.g. "fs name differs
-    (recorded none, found cephfs)"; several differences are joined by ", "."""
+    (recorded the default filesystem, found cephfs)"; several differences are
+    joined by ", ".
+
+    Fields are compared as stored, not as shown, so two values that would
+    print alike still count: a filesystem named "none" is not the default
+    one, and paths with the same printable form are shown as bytes literals.
+    """
 
     def fs_name(name: str | None) -> str:
-        return "none" if name is None else name
+        return "the default filesystem" if name is None else name
+
+    def fs_paths(was: bytes, now: bytes) -> tuple[str, str]:
+        shown = display_path(was), display_path(now)
+        return shown if shown[0] != shown[1] else (repr(was), repr(now))
 
     fields = (
-        ("cluster", recorded.cluster_fsid, found.cluster_fsid),
-        ("fs name", fs_name(recorded.fs_name), fs_name(found.fs_name)),
-        ("fs path", display_path(recorded.fs_path), display_path(found.fs_path)),
-        ("depth", recorded.max_depth, found.max_depth),
+        (
+            "cluster",
+            recorded.cluster_fsid != found.cluster_fsid,
+            (recorded.cluster_fsid, found.cluster_fsid),
+        ),
+        (
+            "fs name",
+            recorded.fs_name != found.fs_name,
+            (fs_name(recorded.fs_name), fs_name(found.fs_name)),
+        ),
+        (
+            "fs path",
+            recorded.fs_path != found.fs_path,
+            fs_paths(recorded.fs_path, found.fs_path),
+        ),
+        (
+            "depth",
+            recorded.max_depth != found.max_depth,
+            (recorded.max_depth, found.max_depth),
+        ),
     )
     return ", ".join(
         f"{label} differs (recorded {was}, found {now})"
-        for label, was, now in fields
-        if was != now
+        for label, differs, (was, now) in fields
+        if differs
     )
 
 

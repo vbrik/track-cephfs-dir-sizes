@@ -258,6 +258,14 @@ the new identity by hand, while nothing samples the tree:
 UPDATE trackdir.tree SET fs_name = 'cephfs' WHERE name = 'projects';
 ```
 
+The refusal's message gives the value to set as "found …". If it says
+"found the default filesystem", the mount names no filesystem, and the value
+is NULL, not a name:
+
+```sql
+UPDATE trackdir.tree SET fs_name = NULL WHERE name = 'projects';
+```
+
 Do this only for the same directory. The next sample is compared with the
 stored current state: pointed at another directory, it would record every
 stored directory as deleted and every found one as new.

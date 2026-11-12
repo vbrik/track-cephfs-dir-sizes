@@ -580,8 +580,22 @@ def test_tree_mismatch_message_names_only_the_differing_field():
     recorded = TreeKey("fsid", None, b"/x", 2)
     error = TreeMismatch("projects", recorded, replace(recorded, fs_name="cephfs"))
     message = dbcli._db_message(error, dbcli.NOTHING_STORED)
-    assert "fs name differs (recorded none, found cephfs)" in message
+    assert "fs name differs (recorded the default filesystem, found cephfs)" in message
     assert message.count(" differs ") == 1
+
+
+def test_tree_mismatch_message_tells_no_fs_name_from_one_called_none():
+    recorded = TreeKey("fsid", "none", b"/x", 2)
+    error = TreeMismatch("projects", recorded, replace(recorded, fs_name=None))
+    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    assert "fs name differs (recorded none, found the default filesystem)" in message
+
+
+def test_tree_mismatch_message_shows_paths_that_print_alike():
+    recorded = TreeKey("fsid", None, b"/a\x80", 2)
+    error = TreeMismatch("projects", recorded, replace(recorded, fs_path=rb"/a\x80"))
+    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    assert "fs path differs (recorded b'/a\\x80', found b'/a\\\\x80')" in message
 
 
 def test_tree_named_otherwise_message_names_the_other_tree():

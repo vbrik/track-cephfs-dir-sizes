@@ -528,7 +528,7 @@ def test_startup_fails_when_a_name_stands_for_another_mount(
         inspect_trees(config, OnceWarner(setup_logging(io.StringIO())))
     message = str(raised.value)
     assert message.startswith("tree projects is recorded in the database as")
-    assert "fs name differs (recorded cephfs, found none)" in message
+    assert "fs name differs (recorded cephfs, found the default filesystem)" in message
     assert "the database was not changed" in message
 
 

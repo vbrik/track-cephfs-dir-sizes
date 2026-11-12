@@ -1010,6 +1010,10 @@ def _resolve_tree(
             f"SELECT name FROM trackdir.tree WHERE {_TREE_MATCH}", _key_params(key)
         ).fetchone()
         if other is not None:
+            if other[0] == name:
+                # This tree was committed between the two lookups, which see
+                # different snapshots under READ COMMITTED: look again.
+                continue
             raise TreeNamedOtherwise(name, other[0], key)
         if not create:
             return None
@@ -1019,7 +1023,7 @@ def _resolve_tree(
             " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             (name, *_key_params(key)),
         )
-    raise DbError(f"tree {name} could not be created: its row changed meanwhile")
+    raise DbError(f"tree {name} changed while it was looked up; try again")
 
 
 def _key_params(key: TreeKey) -> tuple[str, str | None, bytes, int]:

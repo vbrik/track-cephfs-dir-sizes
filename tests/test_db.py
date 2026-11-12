@@ -955,7 +955,7 @@ def test_documented_update_makes_a_name_stand_for_a_new_identity(db):
     init_schema(db)
     store(db, HEADER, dirs(a=1), name="projects")
     assert HEADER.fs_name is None
-    db.execute(doc_sql("UPDATE trackdir.tree"))
+    db.execute(doc_sql("SET fs_name = 'cephfs'"))
     remounted = later(HEADER, 60, fs_name="cephfs")
     second = store(db, remounted, dirs(a=2), name="projects")
     assert [row[:2] for row in tree_rows(db)] == [(1, "projects")]
@@ -1050,3 +1050,45 @@ def test_latest_sample_of_a_tree_is_found_through_an_index(db):
     db.execute("SET enable_seqscan = off")
     plan = db.execute("EXPLAIN " + db_module._LATEST_SAMPLE, (1,)).fetchall()
     assert [line for (line,) in plan if "Seq Scan" in line or "Sort" in line] == []
+
+
+def test_documented_update_for_a_mount_that_names_no_filesystem(db):
+    init_schema(db)
+    named = replace(HEADER, fs_name="cephfs")
+    store(db, named, dirs(a=1), name="projects")
+    with pytest.raises(TreeMismatch):
+        store(db, later(HEADER, 60), dirs(a=2), name="projects")
+    db.execute(doc_sql("SET fs_name = NULL"))
+    second = store(db, later(HEADER, 60), dirs(a=2), name="projects")
+    assert db.execute(
+        "SELECT tree_id, new_dirs, modified_dirs FROM trackdir.sample WHERE id = %s",
+        (second,),
+    ).fetchone() == (1, 0, 2)
+
+
+class ScriptedCursor:
+    """A cursor whose execute() returns the next of ROWS from fetchone()."""
+
+    def __init__(self, *rows) -> None:
+        self.rows = list(rows)
+        self.row = None
+
+    def execute(self, query, params=None):
+        self.row = self.rows.pop(0)
+        return self
+
+    def fetchone(self):
+        return self.row
+
+
+def test_a_tree_created_between_the_two_lookups_is_found_not_refused():
+    """Under READ COMMITTED the lookup by name and the one by identity see
+    different snapshots: the same tree, committed in between, is no conflict."""
+    key = tree_key_of(HEADER)
+    row = (7, key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth)
+    cursor = ScriptedCursor(None, ("projects",), row)
+    resolve = db_module._resolve_tree
+    assert resolve(cursor, "projects", key, lock=False, create=False) == 7
+    cursor = ScriptedCursor(None, ("other",))
+    with pytest.raises(TreeNamedOtherwise):
+        resolve(cursor, "projects", key, lock=False, create=False)
