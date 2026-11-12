@@ -154,6 +154,11 @@ CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
     WHERE error_stage IS NOT NULL;
 """.replace("TREE_NAME", TREE_NAME.pattern)  # noqa: E501
 
+# A sample that adds at least this many paths refreshes the planner's
+# statistics of the tables it joins (see store_sample). Below it a misplanned
+# join costs little: a million comparisons at this size.
+ANALYZE_AFTER = 1000
+
 # The staging table's columns in COPY order; dir_state_row() gives all but
 # deleted.
 STAGE_COLUMNS = ("path", *ROW_COLUMNS, "deleted")
@@ -632,12 +637,24 @@ def store_sample(
         # autovacuum never analyzes a temporary table, and a large sample
         # needs the planner to know its size
         cur.execute("ANALYZE trackdir_stage")
-        cur.execute(_INSERT_PATHS, params)
+        # Statistics gathered before these paths existed say the tree has
+        # none (a new tree) or far fewer, and the joins below are then planned
+        # for a single path: a nested loop over all the new ones, quadratic in
+        # the sample's size. Autovacuum refreshes them only later.
+        bulk = cur.execute(_INSERT_PATHS, params).rowcount >= ANALYZE_AFTER
+        if bulk:
+            cur.execute("ANALYZE trackdir.path")
         # Reads the current state as it was before the sample, so it runs
         # before the statements that change it.
         new, modified, deleted = cur.execute(_INSERT_STATES, params).fetchone()
         cur.execute(_UPSERT_CURRENT, params)
-        cur.execute(_DELETE_CURRENT, params)
+        if bulk:  # for the delete below, and for the tree's next sample
+            cur.execute("ANALYZE trackdir.current_dir_state")
+        # Without tombstones the delete has nothing to do, yet with stale
+        # statistics it was planned from the tree's "one" current row and
+        # compared every row of the tree with every staged row.
+        if diff.deleted:
+            cur.execute(_DELETE_CURRENT, params)
         cur.execute(
             "UPDATE trackdir.sample SET new_dirs = %s, modified_dirs = %s,"
             " deleted_dirs = %s, store_seconds = %s WHERE id = %s",

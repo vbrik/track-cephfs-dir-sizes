@@ -1102,3 +1102,49 @@ def test_schema_doc_says_where_a_tree_id_comes_from(db):
     init_schema(db)
     store(db, HEADER, dirs(a=1), name="projects")
     assert db.execute(doc_sql("SELECT id FROM trackdir.tree")).fetchall() == [(1,)]
+
+
+# Planner statistics after a sample that adds many paths
+
+
+def reltuples(conn, table: str) -> int:
+    return conn.execute(
+        "SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass",
+        (f"trackdir.{table}",),
+    ).fetchone()[0]
+
+
+def many(count: int, size: int = 1) -> list[DirProbe]:
+    """Return ROOT listing COUNT directories of SIZE bytes each."""
+    names = tuple(b"d%06d" % n for n in range(count))
+    root = DirProbe(ROOT, rbytes=count * size, children=names)
+    return [root, *(DirProbe(name, rbytes=size) for name in names)]
+
+
+def test_a_sample_that_adds_many_paths_refreshes_the_planner_statistics(
+    db, monkeypatch
+):
+    """Statistics gathered before a tree existed say it has no paths, and the
+    joins of its first store are then planned for one row."""
+    monkeypatch.setattr(db_module, "ANALYZE_AFTER", 50)
+    init_schema(db)
+    store(db, HEADER, many(9))
+    db.execute("ANALYZE")
+    assert reltuples(db, "path") == reltuples(db, "current_dir_state") == 10
+    other = replace(HEADER, fs_path="/y")
+    store(db, other, many(49))  # 50 new paths with ROOT
+    assert reltuples(db, "path") == reltuples(db, "current_dir_state") == 60
+    store(db, replace(HEADER, fs_path="/z"), many(48))  # one short of the limit
+    assert reltuples(db, "path") == reltuples(db, "current_dir_state") == 60
+
+
+def test_first_sample_of_a_second_tree_is_not_planned_for_an_empty_tree(db):
+    """With statistics from before the tree existed, this store took 28 s for
+    18,635 directories (quadratic); with fresh ones, well under a second."""
+    init_schema(db)
+    store(db, HEADER, many(3000))
+    db.execute("ANALYZE")
+    clock = time.monotonic()
+    store(db, replace(HEADER, fs_path="/y"), many(20_000))
+    assert time.monotonic() - clock < 10
+    assert_invariants(db)

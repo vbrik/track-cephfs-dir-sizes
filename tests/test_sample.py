@@ -639,3 +639,18 @@ def test_live_sample_under_a_known_name_at_another_depth_is_refused(
 def test_dir_limit_advice_says_another_depth_needs_another_name():
     assert "another --tree name" in sample.SAMPLE_LIMIT_ADVICE
     assert "start a new tree" not in sample.SAMPLE_LIMIT_ADVICE
+
+
+def test_second_tree_is_stored_fast_despite_statistics_from_before_it_existed(db, dsn):
+    """The planner's statistics, gathered when only the first tree existed, say
+    the second has no rows; joins planned on that were quadratic (16 s here,
+    7 minutes for the whole fixture)."""
+    sample.run_db_init(dsn)
+    small = SUBTREE.parent / "ceph1-depth3.jsonl.gz"
+    run_sample(SampleOptions(dsn=dsn, tree="a", replay=small), print)
+    db.execute("ANALYZE")
+    res = run_sample(
+        SampleOptions(dsn=dsn, tree="b", replay=SUBTREE, max_depth=3), print
+    )
+    assert res.dirs > 18_000
+    assert res.store_seconds < 5
