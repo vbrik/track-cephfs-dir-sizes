@@ -101,6 +101,47 @@ labels); a columnar store compresses better but adds operations work for a
 volume that does not need it; SQLite could hold the data but gives up network
 access, read-only roles and readers concurrent with the sampler.
 
+### Measured on version 5
+
+`scripts/loadtest.py`, 2026-11-11, PostgreSQL 18 on local NVMe storage (faster
+than the network storage planned for production, so read the trend, not the
+absolute times): one tree of 1 million directories, 200 samples that change
+about 3,700 rows each, and every 20 samples a burst of 200,000 directories
+that is deleted 10 samples later.
+
+| Measure | Start of the run | End of the run |
+|---|---|---|
+| `dir_state` rows | 1.0 million | 5.3 million |
+| Paths ever seen | 1.0 million | 2.8 million |
+| Baseline load, 1.0 million live directories | 1.8 s | 1.8 s |
+| Store of an ordinary sample | 0.25 s | 0.20 s |
+| Store of a burst's creation, 200,000 new directories | 6.4 s | 9.5 s |
+| Store of a burst's deletion, 200,000 tombstones | 3.8 s | 5.5 s |
+
+The first sample, 1 million directories, took 29 s to store. A change row
+costs about 160 bytes with its index entry (version 4: 311). With the short
+paths of this test (16 bytes on average) a path costs about 140 bytes in
+`path` with its two indexes; real paths are several times longer.
+
+- **Ordinary samples do not depend on history**, as designed.
+- **A large sample does, within a bound.** For a sample of hundreds of
+  thousands of rows the planner joins the staging table to `path` by hashing,
+  which reads every path the tree ever held, in three statements (four with
+  deletions). That explains part of the rise; the rest was not attributed and
+  is probably index maintenance on the growing tables. Once `path` is large
+  enough, index lookups are cheaper than the scan, so the cost levels off at
+  about the sample's rows times an index lookup.
+- Foreign-key checks cost 0.5 to 0.7 s per constraint per 200,000 rows,
+  whatever the history: about half of a burst's store time.
+
+Decided 2026-11-12: the burst cost is accepted as it is. A burst of 200,000
+directories stores in seconds against an hourly interval, and the rise is
+bounded. Resolving path ids once into the staging table (one join instead of
+three or four) would reduce it and is the first thing to try if large samples
+ever become slow. The foreign keys stay, including those of
+`current_dir_state`. A run with 10 million directories was not made, so the
+figures for that size remain the projections above.
+
 ## 4. Schema version 5
 
 `meta` is unchanged; `tree` gains a `name` (section 7). `dir_state` keeps its
@@ -354,9 +395,10 @@ None need Ceph or root; database tests need `TRACKDIR_TEST_DSN`.
   documented update.
 - Overrun: with a fake clock, a cycle longer than the interval logs one
   ERROR, finishes, and the next starts at once; status stays 0 on SIGTERM.
-- A synthetic load test, run by hand and not part of the suite: 10 million
-  paths in one tree and simulated churn bursts, recording baseline load,
-  store time and size. Its results replace the projections of section 3.
+- A synthetic load test, run by hand and not part of the suite
+  (`scripts/loadtest.py`): one tree and simulated churn bursts, recording
+  baseline load, store time and size. Section 3 has the results of a run with
+  1 million directories; none was made with 10 million.
 
 ## 9. Implementation order
 
