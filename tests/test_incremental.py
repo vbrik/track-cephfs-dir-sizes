@@ -348,7 +348,9 @@ def test_second_sample_prints_incremental_summary(
     assert main(["sample", "--tree", name, "--replay", str(path), "--db", dsn]) == 0
     stdout, stderr = capsys.readouterr()
     assert stdout == ""
-    assert collapse(stderr).startswith("Stored sample 2 (incremental): probed")
+    assert collapse(stderr).startswith(
+        f"Stored sample 2 (incremental) of tree {name}: probed"
+    )
     assert "5 changed, 0 deleted" in collapse(stderr)
 
 

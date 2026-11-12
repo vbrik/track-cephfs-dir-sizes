@@ -43,10 +43,10 @@ def database(dsn: str, unchanged: str) -> Iterator["psycopg.Connection"]:
         with connect(dsn) as conn:
             yield conn
     except DbError as e:
-        raise FatalError(_db_message(e, unchanged)) from e
+        raise FatalError(db_message(e, unchanged)) from e
 
 
-def _db_message(e: DbError, unchanged: str) -> str:
+def db_message(e: DbError, unchanged: str) -> str:
     """Return the FatalError message for E: what failed and what to do.
 
     UNCHANGED ends the message of an unexpected database error.
@@ -86,10 +86,11 @@ def _db_message(e: DbError, unchanged: str) -> str:
         case TreeMismatch(name=name, recorded=recorded, found=found):
             return (
                 f"tree {name} is recorded in the database as "
-                f"({tree_identity(recorded)}), but what is being sampled is "
+                f"({tree_identity(recorded)}), but what was found is "
                 f"({tree_identity(found)}): {_differences(recorded, found)}; "
-                f"{unchanged}. If ROOT or its mount is wrong, fix it. If this is "
-                "another directory or depth, give it another tree name. If it is "
+                f"{unchanged}. If ROOT, its mount or the replayed capture is the "
+                "wrong one, fix that. If this is another directory or depth, "
+                "give it another tree name. If it is "
                 'the same directory mounted differently, see "Changed mount" '
                 "in docs/schema.md."
             )

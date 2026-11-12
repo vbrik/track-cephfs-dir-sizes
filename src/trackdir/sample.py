@@ -51,11 +51,12 @@ from trackdir.model import DirLimitExceeded, DirProbe, ShouldList, error_counts
 from trackdir.progress import NO_PROGRESS, Progress
 
 # Ends the message of a walk over --max-dirs. Unlike capture's advice it does not
-# suggest a lower --max-depth: the depth is part of the tree's identity, so that
-# would start a new tree and leave this tree's history behind.
+# suggest a lower --max-depth: the depth is part of the tree's mount identity,
+# so that would be another tree and leave this tree's history behind.
 SAMPLE_LIMIT_ADVICE = (
     "Raise --max-dirs if memory allows; the tree stays the same. Another "
-    "--max-depth would start a new tree with a full initial sample."
+    "--max-depth is another tree: it needs another --tree name and begins "
+    "with a full initial sample."
 )
 
 
@@ -227,7 +228,8 @@ def describe_sample(result: SampleResult) -> str:
                 "change that keeps sizes and counts, such as a move, goes unseen)"
             )
     text = (
-        f"Stored sample {result.sample_id} ({result.kind}): {counts}; "
+        f"Stored sample {result.sample_id} ({result.kind}) of tree {result.name}: "
+        f"{counts}; "
         f"{describe_errors(result.errors)}. Walk {result.walk_seconds:.1f} s, "
         f"store {result.store_seconds:.1f} s."
     )

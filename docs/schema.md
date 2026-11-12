@@ -157,6 +157,12 @@ current errors without reading the tree.
 
 ## Example queries
 
+The examples name a tree by its id, here 1. Get it from the tree's name:
+
+```sql
+SELECT id FROM trackdir.tree WHERE name = 'projects';
+```
+
 A tree's current size:
 
 ```sql
@@ -273,7 +279,8 @@ stored directory as deleted and every found one as new.
 ### Removing a tree
 
 A sample's rows are changes, not a listing, so samples cannot be deleted one
-by one (deleting one that has rows fails). Remove a whole tree, here tree 3,
+by one (deleting one that has rows fails). Remove a whole tree, here the one
+with id 3 (`SELECT id FROM trackdir.tree WHERE name = …`),
 rows first, while nothing samples it:
 
 ```sql

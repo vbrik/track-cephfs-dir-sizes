@@ -206,7 +206,8 @@ def test_replay_of_bad_capture_fails(tmp_path, capsys, content, detail):
 
 def test_render_sample_summary():
     assert collapse(render_sample_summary(sample_result())) == (
-        "Stored sample 7 (initial): 5 directories under /mnt/cephfs/x to depth 2, "
+        "Stored sample 7 (initial) of tree x: 5 directories under /mnt/cephfs/x to "
+        "depth 2, "
         "tree (cluster fsid, default filesystem, path /x, depth 2); "
         "2 had errors: open EACCES 2. Walk 1.2 s, store 0.5 s."
     )
@@ -224,14 +225,14 @@ def test_render_sample_summary():
         kind="incremental",
     )
     assert collapse(render_sample_summary(incremental)) == (
-        "Stored sample 7 (incremental): probed 1204 directories under "
+        "Stored sample 7 (incremental) of tree x: probed 1204 directories under "
         "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
         "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees "
         "skipped; none had errors. Walk 3.2 s, store 0.1 s. Replayed from /c.gz."
     )
     pinned = replace(incremental, skipped_pinned=12, replayed_from=None)
     assert collapse(render_sample_summary(pinned)) == (
-        "Stored sample 7 (incremental): probed 1204 directories under "
+        "Stored sample 7 (incremental) of tree x: probed 1204 directories under "
         "/mnt/cephfs/x to depth 4, tree (cluster fsid, filesystem cephfs, path /x, "
         "depth 4); 18 changed, 2 deleted, 31 unchanged subtrees skipped (12 with "
         "a pinned rctime, under which a change that keeps sizes and counts, such "
@@ -475,8 +476,8 @@ def test_live_second_sample_is_pruned_by_the_baseline(db, dsn, tree, fake_ceph, 
     assert main(args) == 0
     assert main(args) == 0  # the fake rstats are constant: nothing changed
     first, second = collapse(capsys.readouterr().err).split(" Stored sample ")
-    assert first.startswith("Stored sample 1 (initial): 5 directories")
-    assert second.startswith("2 (incremental): probed 1 directories")
+    assert first.startswith("Stored sample 1 (initial) of tree t: 5 directories")
+    assert second.startswith("2 (incremental) of tree t: probed 1 directories")
     assert db.execute(
         "SELECT s.id, s.dirs, count(d.*) FILTER (WHERE NOT d.deleted),"
         " count(d.*) FILTER (WHERE d.deleted) FROM trackdir.sample s"
@@ -565,6 +566,8 @@ def test_replay_under_the_name_of_another_tree_is_refused_before_walking(
         )
     message = collapse(str(exc.value))
     assert message.startswith("tree live is recorded in the database as (cluster ")
+    assert "), but what was found is (cluster " in message
+    assert "If ROOT, its mount or the replayed capture is the wrong one" in message
     recorded = load_capture(SUBTREE).header.fs_path
     assert f"fs path differs (recorded {recorded}, found /elsewhere)" in message
     assert "depth differs (recorded 4, found 0)" in message
@@ -579,7 +582,7 @@ def test_replay_under_the_name_of_another_tree_is_refused_before_walking(
 def test_tree_mismatch_message_names_only_the_differing_field():
     recorded = TreeKey("fsid", None, b"/x", 2)
     error = TreeMismatch("projects", recorded, replace(recorded, fs_name="cephfs"))
-    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    message = dbcli.db_message(error, dbcli.NOTHING_STORED)
     assert "fs name differs (recorded the default filesystem, found cephfs)" in message
     assert message.count(" differs ") == 1
 
@@ -587,20 +590,20 @@ def test_tree_mismatch_message_names_only_the_differing_field():
 def test_tree_mismatch_message_tells_no_fs_name_from_one_called_none():
     recorded = TreeKey("fsid", "none", b"/x", 2)
     error = TreeMismatch("projects", recorded, replace(recorded, fs_name=None))
-    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    message = dbcli.db_message(error, dbcli.NOTHING_STORED)
     assert "fs name differs (recorded none, found the default filesystem)" in message
 
 
 def test_tree_mismatch_message_shows_paths_that_print_alike():
     recorded = TreeKey("fsid", None, b"/a\x80", 2)
     error = TreeMismatch("projects", recorded, replace(recorded, fs_path=rb"/a\x80"))
-    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    message = dbcli.db_message(error, dbcli.NOTHING_STORED)
     assert "fs path differs (recorded b'/a\\x80', found b'/a\\\\x80')" in message
 
 
 def test_tree_named_otherwise_message_names_the_other_tree():
     error = TreeNamedOtherwise("b", "a", TreeKey("fsid", None, b"/x", 2))
-    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    message = dbcli.db_message(error, dbcli.NOTHING_STORED)
     assert "is already recorded as tree a, not b; nothing was stored" in message
     assert message.endswith("use the name a.")
 
@@ -631,3 +634,8 @@ def test_live_sample_under_a_known_name_at_another_depth_is_refused(
     err = collapse(capsys.readouterr().err)
     assert "depth differs (recorded 2, found 3)" in err
     assert db.execute("SELECT count(*) FROM trackdir.tree").fetchone() == (1,)
+
+
+def test_dir_limit_advice_says_another_depth_needs_another_name():
+    assert "another --tree name" in sample.SAMPLE_LIMIT_ADVICE
+    assert "start a new tree" not in sample.SAMPLE_LIMIT_ADVICE

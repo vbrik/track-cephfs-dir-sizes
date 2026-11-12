@@ -23,8 +23,14 @@ from typing import NoReturn, Protocol, TextIO
 
 from trackdir import __version__
 from trackdir.config import DaemonConfig, Interval, TreeConfig, load
-from trackdir.db import TreeKey, check_schema, latest_started
-from trackdir.dbcli import DB_UNCHANGED, database, describe_tree
+from trackdir.db import (
+    TreeKey,
+    TreeMismatch,
+    TreeNamedOtherwise,
+    check_schema,
+    latest_started,
+)
+from trackdir.dbcli import DB_UNCHANGED, database, db_message, describe_tree
 from trackdir.interrupts import Overrun, Terminated, deadline, terminate_on_signals
 from trackdir.live import open_live_root
 from trackdir.messages import FatalError
@@ -151,10 +157,17 @@ def inspect_trees(
                     )
                 )
         _check_distinct(config, keys)
-        return tuple(
-            latest_started(conn, tree.name, key)
-            for tree, key in zip(config.trees, keys, strict=True)
-        )
+        latest = []
+        for n, (tree, key) in enumerate(zip(config.trees, keys, strict=True), 1):
+            try:
+                latest.append(latest_started(conn, tree.name, key))
+            except (TreeMismatch, TreeNamedOtherwise) as e:
+                # Say which entry: the refusal itself names only the tree.
+                raise FatalError(
+                    f"tree {n} in {config.path} ({tree.root}): "
+                    f"{db_message(e, DB_UNCHANGED)}"
+                ) from e
+        return tuple(latest)
 
 
 def run_cycles(

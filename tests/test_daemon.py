@@ -189,7 +189,9 @@ def test_cycles_sample_trees_in_order_start_to_start(tmp_path):
     messages = [message for _, message in logged]
     finished = [m for m in messages if m.startswith("cycle finished in 20.0 s; next")]
     assert len(finished) == 3
-    assert sum(m.startswith("Stored sample 7 (initial)") for m in messages) == 6
+    assert (
+        sum(m.startswith("Stored sample 7 (initial) of tree x:") for m in messages) == 6
+    )
     assert logged[-1] == ("INFO", "SIGTERM received. Stopped.")
 
 
@@ -527,7 +529,9 @@ def test_startup_fails_when_a_name_stands_for_another_mount(
     with pytest.raises(FatalError) as raised:
         inspect_trees(config, OnceWarner(setup_logging(io.StringIO())))
     message = str(raised.value)
-    assert message.startswith("tree projects is recorded in the database as")
+    assert message.startswith(
+        f"tree 1 in t.toml ({root}): tree projects is recorded in the database as"
+    )
     assert "fs name differs (recorded cephfs, found the default filesystem)" in message
     assert "the database was not changed" in message
 

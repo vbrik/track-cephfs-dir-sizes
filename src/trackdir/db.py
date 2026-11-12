@@ -27,6 +27,13 @@ if TYPE_CHECKING:
     import psycopg
 
 SCHEMA = "trackdir"  # the DDL and queries fix this name; it is not a setting
+# A tree's name: 1 to 64 of these characters, the first a letter or digit. The
+# DDL's CHECK on tree.name is built from the same pattern.
+TREE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+TREE_NAME_RULE = (
+    "1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-', the first a letter or digit"
+)
+
 SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
 
 # The schema-v5 spec's section 4. path names every directory a tree ever held,
@@ -53,7 +60,7 @@ CREATE TABLE trackdir.meta (
 CREATE TABLE trackdir.tree (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name         text  NOT NULL UNIQUE  -- the user's; the next four are what it stands for
-                 CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+                 CHECK (name ~ '^TREE_NAME$'),
     cluster_fsid text  NOT NULL,
     fs_name      text,            -- NULL: the cluster's default filesystem
     fs_path      bytea NOT NULL,  -- ROOT inside the filesystem; b'/' is its root
@@ -145,18 +152,11 @@ CREATE TABLE trackdir.current_dir_state (
 );
 CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
     WHERE error_stage IS NOT NULL;
-"""  # noqa: E501
+""".replace("TREE_NAME", TREE_NAME.pattern)  # noqa: E501
 
 # The staging table's columns in COPY order; dir_state_row() gives all but
 # deleted.
 STAGE_COLUMNS = ("path", *ROW_COLUMNS, "deleted")
-
-# A tree's name: 1 to 64 of these characters, the first a letter or digit. The
-# DDL's CHECK on tree.name says the same.
-TREE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-TREE_NAME_RULE = (
-    "1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-', the first a letter or digit"
-)
 
 # Matches a tree by key, in _key_params() order. fs_name is NULL for the default
 # filesystem, which "=" would never match.
@@ -202,8 +202,8 @@ class SchemaVersionMismatch(DbError):
 
 @dataclass(frozen=True, slots=True)
 class TreeKey:
-    """Identifies a tree: a directory of a CephFS filesystem, on any host or mount,
-    sampled to one depth.
+    """A tree's mount identity: a directory of a CephFS filesystem, on any host
+    or mount, sampled to one depth. A tree's name stands for one.
 
     A run with another max_depth belongs to another tree, which has its own
     samples and baseline. max_dirs is not part of the key: a run over it stores

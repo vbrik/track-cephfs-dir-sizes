@@ -1092,3 +1092,13 @@ def test_a_tree_created_between_the_two_lookups_is_found_not_refused():
     cursor = ScriptedCursor(None, ("other",))
     with pytest.raises(TreeNamedOtherwise):
         resolve(cursor, "projects", key, lock=False, create=False)
+
+
+def test_the_ddl_checks_names_by_the_pattern_the_code_uses():
+    assert f"CHECK (name ~ '^{db_module.TREE_NAME.pattern}$')" in db_module.DDL
+
+
+def test_schema_doc_says_where_a_tree_id_comes_from(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    assert db.execute(doc_sql("SELECT id FROM trackdir.tree")).fetchall() == [(1,)]
