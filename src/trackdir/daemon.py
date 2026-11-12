@@ -135,8 +135,10 @@ def inspect_trees(
     """Check that every tree can be sampled; return their latest sample starts.
 
     Fails, with FatalError, on a missing or mismatched schema, a ROOT that
-    cannot be opened or is not CephFS, and two entries naming the same tree:
-    they would collide on every cycle.
+    cannot be opened or is not CephFS, two entries for the same directory and
+    depth (they would collide on every cycle), and a tree whose name the
+    database holds for another mount identity, or whose mount identity it
+    holds under another name.
     """
     with database(config.dsn, DB_UNCHANGED) as conn:
         check_schema(conn)

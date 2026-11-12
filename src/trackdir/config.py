@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from trackdir.db import TREE_NAME_RULE, valid_tree_name
 from trackdir.dbcli import DSN_ENV
 from trackdir.live import DEFAULT_JOBS, DEFAULT_MAX_DIRS
 from trackdir.messages import FatalError
@@ -98,13 +99,22 @@ def load(path: Path) -> DaemonConfig:
         raise FatalError(
             f"{path}: tree must be a list of [[tree]] tables with at least one entry."
         )
-    return DaemonConfig(
+    config = DaemonConfig(
         path=path,
         interval=interval,
         dsn=_dsn(path, data),
         log_level=_log_level(path, data.get("log_level", "INFO")),
         trees=tuple(_tree(path, n, tree) for n, tree in enumerate(trees, 1)),
     )
+    first: dict[str, int] = {}
+    for n, tree in enumerate(config.trees, 1):
+        earlier = first.setdefault(tree.name, n)
+        if earlier != n:
+            raise FatalError(
+                f"{path}: trees {earlier} and {n} both have the name {tree.name}; "
+                "give each tree its own name."
+            )
+    return config
 
 
 def _tree(path: Path, n: int, data: Mapping[str, Any]) -> TreeConfig:
@@ -121,6 +131,8 @@ def _tree(path: Path, n: int, data: Mapping[str, Any]) -> TreeConfig:
     name = _required(path, where, data, "name")
     if not isinstance(name, str):
         raise FatalError(f"{path}: {where}name must be a string: {name!r}.")
+    if not valid_tree_name(name):
+        raise FatalError(f"{path}: {where}name must be {TREE_NAME_RULE}: {name!r}.")
     return TreeConfig(
         name=name,
         root=Path(root),

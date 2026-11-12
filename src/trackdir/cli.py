@@ -104,12 +104,13 @@ The database schema must exist: run `trackdir db init` once.
 """
 
 DAEMON_EPILOG = f"""\
-FILE is TOML. interval, at least one [[tree]], and each tree's root and
+FILE is TOML. interval, at least one [[tree]], and each tree's name, root and
 max_depth are required; the other keys are shown with their defaults:
   interval = "6h"             # <integer><unit>, unit s, m, h or d
   db = "postgresql://trackdir@db.example.org/trackdir"   # default: ${dbcli.DSN_ENV}
   log_level = "INFO"          # DEBUG, INFO, WARNING or ERROR
   [[tree]]                    # one per tree, sampled in this order
+  name = "projects"           # as trackdir sample --tree; unique in FILE
   root = "/mnt/cephfs/projects"
   max_depth = 4
   max_dirs = {DEFAULT_MAX_DIRS}
@@ -121,6 +122,11 @@ restart adds no sample. A cycle still running when the next is due is an
 overrun: it is logged at once, the sample in progress is aborted and stores
 nothing (samples the cycle already stored stay), and the daemon exits once the
 probes in flight return, which a stuck MDS can delay.
+
+A tree's name is checked against what is mounted at its root, at startup and
+at every sample. A new name starts a tree. A name that the database holds for
+another directory, depth or filesystem name is an error, so a changed mount
+cannot start a new history unnoticed; the message says what differs.
 
 Per-directory errors are stored and counted, as by trackdir sample. Any other
 error is logged and stops the daemon, so run it under a service manager that

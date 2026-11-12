@@ -144,6 +144,25 @@ REJECTED = [
         ["max_dirs", "at most"],
     ),
     ("jobs_zero", _tree(root='"/a"', max_depth="1", jobs="0"), ["jobs", "at least"]),
+    (
+        "no_name",
+        'interval = "6h"\ndb = "x"\n[[tree]]\nroot = "/a"\nmax_depth = 1\n',
+        ["tree 1", "name is required"],
+    ),
+    ("name_type", _tree(name="5", root='"/a"', max_depth="1"), ["name", "string"]),
+    *(
+        (
+            f"name_malformed_{n}",
+            _tree(name=name, root='"/a"', max_depth="1"),
+            ["tree 1", "name must be 1 to 64 characters", "letter or digit"],
+        )
+        for n, name in enumerate(['""', '"a b"', '"-a"', '"a/b"', f'"{"a" * 65}"'])
+    ),
+    (
+        "name_twice",
+        MINIMAL + '\n[[tree]]\nname = "a"\nroot = "/mnt/cephfs/b"\nmax_depth = 1\n',
+        ["trees 1 and 2", "name a", "its own name"],
+    ),
     ("root_type", _tree(root="1", max_depth="1"), ["root", "string"]),
     ("relative_root", _tree(root='"a/b"', max_depth="1"), ["root", "absolute"]),
     ("nul_root", _tree(root='"/a\\u0000b"', max_depth="1"), ["root", "NUL"]),

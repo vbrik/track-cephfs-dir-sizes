@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 from conftest import sample_result
 
-from trackdir import __version__, daemon, live
+from trackdir import __version__, daemon, dbcli, live
+from trackdir.cli import main
 from trackdir.config import DaemonConfig, Interval, TreeConfig
 from trackdir.daemon import (
     OnceWarner,
@@ -21,6 +22,7 @@ from trackdir.daemon import (
     run_cycles,
     setup_logging,
 )
+from trackdir.db import TreeKey, TreeMismatch
 from trackdir.interrupts import Terminated
 from trackdir.live import MSG_NO_DIRSTAT
 from trackdir.messages import FatalError
@@ -502,3 +504,54 @@ def test_startup_rejects_non_cephfs_root(tmp_path, no_database):
     assert level == "ERROR"
     assert str(root) in message
     assert sampler.calls == []
+
+
+def test_startup_fails_when_a_name_stands_for_another_mount(
+    tmp_path, fake_ceph, monkeypatch
+):
+    recorded = TreeKey("fsid", "cephfs", b"/x", 1)
+
+    def mismatch(conn, name, key):
+        raise TreeMismatch(name, recorded, key)
+
+    # The real database() turns the DbError into the message; only the
+    # connection and the queries are replaced.
+    monkeypatch.setattr(dbcli, "connect", lambda dsn: contextlib.nullcontext(object()))
+    monkeypatch.setattr(daemon, "check_schema", lambda conn: None)
+    monkeypatch.setattr(daemon, "latest_started", mismatch)
+    root = tmp_path / "a"
+    root.mkdir()
+    config = DaemonConfig(
+        Path("t.toml"), Interval(HOUR, "1h"), "x", 0, (TreeConfig("projects", root, 1),)
+    )
+    with pytest.raises(FatalError) as raised:
+        inspect_trees(config, OnceWarner(setup_logging(io.StringIO())))
+    message = str(raised.value)
+    assert message.startswith("tree projects is recorded in the database as")
+    assert "fs name differs (recorded cephfs, found none)" in message
+    assert "the database was not changed" in message
+
+
+def test_samples_are_taken_under_the_configured_names(tmp_path):
+    fake = FakeTime(stop_after=1)
+    names = []
+    sampler = FakeSampler(
+        fake, action=lambda opts, warn, progress: names.append(opts.tree)
+    )
+    run(
+        write_config(tmp_path),
+        stream=io.StringIO(),
+        inspect=lambda config, warn: (None,) * len(ROOTS),
+        sample=sampler,
+        clock=fake.clock,
+        sleep=fake.sleep,
+    )
+    assert names[: len(ROOTS)] == [f"t{n}" for n in range(1, len(ROOTS) + 1)]
+
+
+def test_help_lists_the_tree_name_key(capsys):
+    with pytest.raises(SystemExit):
+        main(["daemon", "--help"])
+    text = capsys.readouterr().out
+    assert 'name = "projects"' in text
+    assert "checked against" in text
