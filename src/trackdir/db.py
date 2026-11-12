@@ -482,7 +482,7 @@ def latest_started(conn: "psycopg.Connection", key: TreeKey) -> datetime | None:
     """Return when tree KEY's latest sample started; None without samples.
 
     The latest sample is the one with the greatest (started, id), as in the
-    baseline. Unlike load_baseline, this reads no dir_state rows.
+    baseline. Unlike load_baseline, this reads no directory rows.
     """
     with _db_errors(), conn.cursor() as cur:
         tree = cur.execute(
@@ -510,7 +510,9 @@ def store_sample(
     dir_state rows are DIFF's changed probes and a tombstone per deleted path.
     They are loaded with COPY into a temporary table, from which SQL gives
     new paths an id, adds each row's previous rstats and updates the tree's
-    current state: all of it in proportion to the sample's rows. KEY must be
+    current state: all of it in proportion to the sample's rows, except that
+    a sample of very many rows is joined to path by reading all of path (see
+    "Measured on version 5" in the schema-v5 spec). KEY must be
     HEADER's tree, else ValueError. BASELINE is what DIFF was computed against.
     REPLAYED_FROM is the capture's absolute path, None for a live sample.
     BASELINE_SECONDS, the time loading BASELINE took, is stored with the

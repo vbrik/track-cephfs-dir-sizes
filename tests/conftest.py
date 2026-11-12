@@ -297,15 +297,27 @@ WHERE created IS DISTINCT FROM coalesce(was_deleted, true)
 """
 
 
+_COUNTS_DIFFER = """SELECT count(*) FROM trackdir.sample s, LATERAL (
+    SELECT count(*) FILTER (WHERE d.created) AS new,
+           count(*) FILTER (WHERE NOT d.created AND NOT d.deleted) AS modified,
+           count(*) FILTER (WHERE d.deleted) AS deleted
+    FROM trackdir.dir_state d WHERE d.sample_id = s.id
+) rows
+WHERE (s.new_dirs, s.modified_dirs, s.deleted_dirs)
+      IS DISTINCT FROM (rows.new, rows.modified, rows.deleted)"""
+
+
 def assert_invariants(conn) -> None:
     """Check what store_sample derives from dir_state against a rebuild.
 
     current_dir_state is each path's latest row unless that is a tombstone;
     a row's prev_* are its path's previous row's rstats, and it is created
-    exactly if there is none or it is a tombstone.
+    exactly if there is none or it is a tombstone; a sample's new_dirs,
+    modified_dirs and deleted_dirs count its rows.
     """
     from trackdir.baseline import ROW_COLUMNS
 
     not_rebuilt = _NOT_REBUILT.format(columns=", ".join(ROW_COLUMNS))
     assert conn.execute(not_rebuilt).fetchone()[0] == 0
     assert conn.execute(_BROKEN_CHAIN).fetchone()[0] == 0
+    assert conn.execute(_COUNTS_DIFFER).fetchone()[0] == 0

@@ -708,16 +708,6 @@ def test_non_utf8_path_round_trips_through_staging(db):
     assert history(db, name, "prev_rbytes") == [(None,), (1,)]
 
 
-_COUNTS_DIFFER = """SELECT count(*) FROM trackdir.sample s, LATERAL (
-    SELECT count(*) FILTER (WHERE d.created) AS new,
-           count(*) FILTER (WHERE NOT d.created AND NOT d.deleted) AS modified,
-           count(*) FILTER (WHERE d.deleted) AS deleted
-    FROM trackdir.dir_state d WHERE d.sample_id = s.id
-) rows
-WHERE (s.new_dirs, s.modified_dirs, s.deleted_dirs)
-      IS DISTINCT FROM (rows.new, rows.modified, rows.deleted)"""
-
-
 def test_sample_counts_match_its_rows(db):
     init_schema(db)
     steps = [dirs(a=1, b=2), dirs(a=5, c=3), dirs(a=5, c=3), dirs(b=1)]
@@ -735,7 +725,7 @@ def test_sample_counts_match_its_rows(db):
         (0, 0, 0),
         (1, 1, 2),  # b again; ROOT; a and c
     ]
-    assert db.execute(_COUNTS_DIFFER).fetchone() == (0,)
+    assert_invariants(db)
 
 
 def test_sample_records_phase_times(db):

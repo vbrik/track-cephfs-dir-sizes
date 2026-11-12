@@ -1,6 +1,7 @@
 import gzip
 import os
 import sys
+import time
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime
@@ -477,3 +478,18 @@ def test_live_sample_erases_its_progress_before_the_summary(
         "storing 4 directories and 0 deletions",
     ]
     assert summary.startswith("Stored sample 1")
+
+
+def test_baseline_seconds_times_the_load_not_the_rest_of_the_pre_check(
+    db, dsn, monkeypatch
+):
+    sample.run_db_init(dsn)
+    real = sample.check_schema
+
+    def slow_check(conn):
+        time.sleep(0.3)
+        real(conn)
+
+    monkeypatch.setattr(sample, "check_schema", slow_check)
+    res = run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_depth=1), print)
+    assert 0 < res.baseline_seconds < 0.3

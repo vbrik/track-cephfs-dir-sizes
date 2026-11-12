@@ -51,7 +51,9 @@
   from `current_dir_state`. For the same reason samples are not deleted
   individually (`dir_state.sample_id` has no `ON DELETE CASCADE`).
 - The work of a sample depends on the tree's live directories and on what
-  changed, never on how much history is stored. Reads that would sort or scan
+  changed, never on how much history is stored. (One accepted exception: the
+  store of a sample with very many rows reads all of `path`; see "Measured
+  on version 5" in the schema-v5 spec.) Reads that would sort or scan
   a tree's history are avoided by storing what they would compute:
   `current_dir_state`, `dir_state`'s `prev_*` and `created`, and `sample`'s
   counts of new, modified and deleted rows. Such copies

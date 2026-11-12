@@ -89,7 +89,7 @@ class SampleResult:
     skipped: int  # unchanged directories not listed: pruned subtrees
     skipped_pinned: int  # of them, those with a pinned rctime
     errors: Counter[tuple[str, str]]  # (stage, code) -> number of directories
-    baseline_seconds: float  # the pre-check, which loads the baseline
+    baseline_seconds: float  # loading the baseline
     walk_seconds: float
     store_seconds: float
     replayed_from: str | None  # absolute capture path; None for a live sample
@@ -105,7 +105,7 @@ class _Walk:
     baseline: Baseline
     probes: list[DirProbe]
     seconds: float  # of the walk
-    baseline_seconds: float  # of the pre-check, which loads the baseline
+    baseline_seconds: float  # of loading the baseline
 
 
 def replay_walk(
@@ -269,9 +269,7 @@ def _walk_live(
         # falsely; it fails before the walk if the tree's latest sample is
         # dated in the future (clock skew, or another host sampled the tree).
         progress.phase("loading the baseline")
-        clock = time.monotonic()
-        baseline = _precheck(opts, key, datetime.now(UTC))
-        baseline_seconds = time.monotonic() - clock
+        baseline, baseline_seconds = _precheck(opts, key, datetime.now(UTC))
         walked = walk_live(
             live,
             max_depth=opts.max_depth,
@@ -296,9 +294,7 @@ def _walk_replay(opts: SampleOptions, progress: Progress) -> _Walk:
     key = tree_key_of(replace(capture.header, max_depth=max_depth))
     started = datetime.fromisoformat(capture.header.started)
     progress.phase("loading the baseline")
-    clock = time.monotonic()
-    baseline = _precheck(opts, key, started)
-    baseline_seconds = time.monotonic() - clock
+    baseline, baseline_seconds = _precheck(opts, key, started)
     clock = time.monotonic()
     header, probes = replay_walk(
         capture, max_depth, opts.max_dirs, should_list_changed(baseline), progress
@@ -324,8 +320,12 @@ def _replay_backend(capture: Capture, max_depth: int) -> ReplayBackend:
         raise FatalError(f"{e}.") from e
 
 
-def _precheck(opts: SampleOptions, key: TreeKey, started: datetime) -> Baseline:
-    """Return tree KEY's baseline; raise FatalError unless a sample can be stored.
+def _precheck(
+    opts: SampleOptions, key: TreeKey, started: datetime
+) -> tuple[Baseline, float]:
+    """Return tree KEY's baseline and the seconds it took to load.
+
+    Raises FatalError unless a sample can be stored.
 
     The schema must be current, the baseline within opts.max_dirs (an
     incremental walk probes only part of the tree, so the walk's own check
@@ -335,6 +335,7 @@ def _precheck(opts: SampleOptions, key: TreeKey, started: datetime) -> Baseline:
     """
     with database(opts.dsn, NOTHING_STORED) as conn:
         check_schema(conn)
+        clock = time.monotonic()
         try:
             baseline = load_baseline(conn, key, max_dirs=opts.max_dirs)
         except DirLimitExceeded as e:
@@ -342,5 +343,6 @@ def _precheck(opts: SampleOptions, key: TreeKey, started: datetime) -> Baseline:
                 f"the {describe_tree(key)} had more than {e.limit} directories "
                 f"at its latest sample. {SAMPLE_LIMIT_ADVICE}"
             ) from e
+        seconds = time.monotonic() - clock
         check_order(baseline, key, started)
-    return baseline
+    return baseline, seconds

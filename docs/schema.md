@@ -82,7 +82,7 @@ One run of `trackdir sample` over a tree.
 | `replayed_from` | text | Absolute path of the replayed capture; NULL for a live sample. |
 | `stored` | timestamptz | When the sample was stored. |
 | `new_dirs`, `modified_dirs`, `deleted_dirs` | bigint | The sample's `dir_state` rows: those with `created`, those with neither `created` nor `deleted`, and tombstones. They always equal a count of its rows, and spare readers that count. |
-| `baseline_seconds` | double precision | Time the run took to load the tree's current state before the walk. |
+| `baseline_seconds` | double precision | Time the run took to load the tree's current state before the walk; connecting and the checks made before the walk are not counted. |
 | `store_seconds` | double precision | Time the store took, from the start of its transaction to just before the commit. |
 
 ### `path`

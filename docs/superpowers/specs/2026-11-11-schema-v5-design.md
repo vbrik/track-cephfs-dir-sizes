@@ -124,19 +124,20 @@ paths of this test (16 bytes on average) a path costs about 140 bytes in
 `path` with its two indexes; real paths are several times longer.
 
 - **Ordinary samples do not depend on history**, as designed.
-- **A large sample does, within a bound.** For a sample of hundreds of
-  thousands of rows the planner joins the staging table to `path` by hashing,
-  which reads every path the tree ever held, in three statements (four with
-  deletions). That explains part of the rise; the rest was not attributed and
-  is probably index maintenance on the growing tables. Once `path` is large
-  enough, index lookups are cheaper than the scan, so the cost levels off at
-  about the sample's rows times an index lookup.
+- **A large sample does.** For a sample of hundreds of thousands of rows the
+  planner joins the staging table to `path` by hashing, which reads every
+  path ever held by any tree (`path` is one table; the test had one tree), in
+  three statements (four with deletions). That explains part of the rise; the
+  rest was not attributed and is probably index maintenance on the growing
+  tables. Expected, not measured: once `path` is large enough, index lookups
+  are cheaper than the scan, so the cost should level off at about the
+  sample's rows times an index lookup. No run reached that point.
 - Foreign-key checks cost 0.5 to 0.7 s per constraint per 200,000 rows,
   whatever the history: about half of a burst's store time.
 
 Decided 2026-11-12: the burst cost is accepted as it is. A burst of 200,000
 directories stores in seconds against an hourly interval, and the rise is
-bounded. Resolving path ids once into the staging table (one join instead of
+expected to be bounded, as above. Resolving path ids once into the staging table (one join instead of
 three or four) would reduce it and is the first thing to try if large samples
 ever become slow. The foreign keys stay, including those of
 `current_dir_state`. A run with 10 million directories was not made, so the
@@ -193,7 +194,7 @@ CREATE INDEX ON trackdir.current_dir_state (tree_id)
 | Column | Type | Meaning |
 |---|---|---|
 | `new_dirs`, `modified_dirs`, `deleted_dirs` | bigint | Rows the sample stored with `created`, with neither flag, and with `deleted`. |
-| `baseline_seconds` | double precision | Time to load the baseline before the walk. |
+| `baseline_seconds` | double precision | Time to load the baseline before the walk, without connecting or the other checks made before it. |
 | `store_seconds` | double precision | Time from the start of the store transaction to just before its commit. |
 
 Why each piece:
@@ -256,7 +257,8 @@ unchanged.
 The database, not the client, resolves path ids and previous values, under
 the lock that serializes a tree's samples. So they cannot disagree with what
 is stored, and the client sends the same data as today. Every step costs in
-proportion to the sample's rows.
+proportion to the sample's rows, with the exception measured in section 3: a
+sample of very many rows is joined to `path` by reading all of it.
 
 **Removing a tree** deletes its `dir_state` rows (through its samples), its
 `current_dir_state` rows, its samples, its paths, then the tree row.
