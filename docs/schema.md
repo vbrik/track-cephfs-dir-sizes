@@ -23,6 +23,10 @@ version 5 on, every change ships an upgrade step (see
   `path` gives its bytes and its tree. Trees may overlap, and the same
   relative path can exist in several, each with its own id and history. A
   path deleted and created again keeps its id.
+- **Find a directory by its path through `path`**, whose `(tree_id, path)`
+  index gives its id; `dir_state` and `current_dir_state` are indexed by that
+  id. A condition on `current_dir_state.path` alone reads the tree's whole
+  current state.
 - **Each row says what it replaced.** `prev_rbytes`, `prev_rfiles` and
   `prev_rsubdirs` are the directory's rstats before the sample, so the change
   over a window of samples is its last row's value minus its first row's
@@ -150,8 +154,10 @@ current errors without reading the tree.
 A tree's current size:
 
 ```sql
-SELECT rbytes, rfiles, rsubdirs FROM trackdir.current_dir_state
-WHERE tree_id = 1 AND path = convert_to('.', 'UTF8');
+SELECT c.rbytes, c.rfiles, c.rsubdirs
+FROM trackdir.path p
+JOIN trackdir.current_dir_state c ON c.tree_id = p.tree_id AND c.path_id = p.id
+WHERE p.tree_id = 1 AND p.path = convert_to('.', 'UTF8');
 ```
 
 A directory's history. A row appears only in samples where the directory
@@ -168,12 +174,15 @@ ORDER BY s.started, s.id;
 
 What changed in tree 1 since a moment, with each directory's growth. The
 first row of a directory in the window holds its size before the window, the
-last its size now; a directory created in the window grew from 0:
+last its size now. A directory created in the window grew from 0; one whose
+size before the window was not read has an unknown growth, not its whole
+size:
 
 ```sql
 SELECT DISTINCT p.path,
        last_value(d.rbytes) OVER w
-       - coalesce(first_value(d.prev_rbytes) OVER w, 0) AS grew,
+       - CASE WHEN first_value(d.created) OVER w THEN 0
+              ELSE first_value(d.prev_rbytes) OVER w END AS grew,
        first_value(d.created) OVER w AS created,
        last_value(d.deleted) OVER w AS deleted
 FROM trackdir.sample s
@@ -216,14 +225,16 @@ FROM trackdir.path p JOIN trackdir.tree t ON t.id = p.tree_id;
 The schema needs PostgreSQL 15 or newer. `trackdir db init` creates it, so
 its role needs `CREATE` on the database, and schema `trackdir` must not exist
 yet: an existing one, even empty, is refused as incomplete. That role owns
-every table; run `trackdir sample` and `trackdir daemon` as it.
+every table; run `trackdir sample` and `trackdir daemon` as it. Storing a
+sample creates a temporary table, so the role also needs `TEMPORARY` on the
+database, which every role has unless it was revoked.
 
 A read-only role can run `trackdir db summary` and the example queries above;
 sampling as it fails with "permission denied" and stores nothing:
 
 ```sql
 GRANT USAGE ON SCHEMA trackdir TO reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA trackdir TO reader;  -- includes the view
+GRANT SELECT ON ALL TABLES IN SCHEMA trackdir TO reader;
 ```
 
 ### Removing a tree
@@ -234,11 +245,21 @@ rows first, while nothing samples it:
 
 ```sql
 BEGIN;
+CREATE INDEX removal_sample ON trackdir.current_dir_state (sample_id);
+CREATE INDEX removal_path ON trackdir.current_dir_state (path_id);
 DELETE FROM trackdir.dir_state
 WHERE sample_id IN (SELECT id FROM trackdir.sample WHERE tree_id = 3);
 DELETE FROM trackdir.current_dir_state WHERE tree_id = 3;
 DELETE FROM trackdir.sample WHERE tree_id = 3;
 DELETE FROM trackdir.path WHERE tree_id = 3;
 DELETE FROM trackdir.tree WHERE id = 3;
+DROP INDEX trackdir.removal_sample, trackdir.removal_path;
 COMMIT;
 ```
+
+The two indexes exist only for the removal. Deleting a sample or a path makes
+PostgreSQL check that no row of `current_dir_state` refers to it, among the
+other trees' rows too, and without an index each check reads that whole
+table: once per sample and once per path. They are not kept, because an
+index on `sample_id` would slow every sample down. Creating them blocks
+samples of every tree until the `COMMIT`.

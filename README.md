@@ -42,7 +42,8 @@ Put the database password in `~/.pgpass` or `PGPASSWORD`, never in `--db`:
 `ps` shows command lines to every local user.
 
 `db init` creates the schema `trackdir`, so its role needs `CREATE` on the
-database, and the schema must not exist yet. Sample as that role. For
+database, and the schema must not exist yet. Sample as that role; it also
+needs `TEMPORARY` on the database, which roles have by default. For
 read-only users and for removing a tree, see
 [docs/schema.md](docs/schema.md#access).
 

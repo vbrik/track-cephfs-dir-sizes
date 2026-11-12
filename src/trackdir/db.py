@@ -712,10 +712,13 @@ WHERE {_IN_TREE.format(column="tree_id")}
 ORDER BY tree_id, started, id
 """
 # ROOT's current row with rstats, per tree: RootTotals's fields after tree_id.
-_ROOT_NOW = f"""SELECT tree_id, sample_id, rbytes, rfiles, rsubdirs
-FROM trackdir.current_dir_state
-WHERE path = %(root)s AND rbytes IS NOT NULL
-  AND {_IN_TREE.format(column="tree_id")}
+# ROOT's id comes from path's (tree_id, path) index, one lookup per tree, and
+# finds the row by primary key; current_dir_state has no index on its path.
+_ROOT_NOW = f"""SELECT t.id, c.sample_id, c.rbytes, c.rfiles, c.rsubdirs
+FROM trackdir.tree t
+JOIN trackdir.path p ON p.tree_id = t.id AND p.path = %(root)s
+JOIN trackdir.current_dir_state c ON c.tree_id = t.id AND c.path_id = p.id
+WHERE c.rbytes IS NOT NULL AND {_IN_TREE.format(column="t.id")}
 """
 # ROOT's earliest row with rstats in tree %(tree)s. A tree's sample ids are in
 # (started, id) order, so the primary key gives it without a sort.

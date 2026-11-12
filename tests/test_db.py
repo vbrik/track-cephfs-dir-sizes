@@ -747,3 +747,98 @@ def test_sample_records_phase_times(db):
     ).fetchone()
     assert baseline_seconds == 1.5
     assert 0 < store_seconds < 60
+
+
+# Review fixes: the documented queries and procedures, and ROOT's lookup
+
+
+def doc_sql(marker: str) -> str:
+    """Return the SQL example of docs/schema.md that contains MARKER."""
+    doc = (SRC.parent / "docs" / "schema.md").read_text()
+    (block,) = [b for b in re.findall(r"```sql\n(.*?)```", doc, re.S) if marker in b]
+    return block
+
+
+def test_window_example_gives_no_growth_when_the_start_is_unknown(db):
+    init_schema(db)
+    failing = DirProbe(b"e", error=ProbeError(Stage.RSTATS, "EIO"))
+    store(
+        db,
+        HEADER,
+        [
+            DirProbe(ROOT, rbytes=5, children=(b"e", b"gone")),
+            failing,
+            DirProbe(b"gone", rbytes=5),
+        ],
+    )
+    store(db, later(HEADER, 60), dirs(e=1000, new=7))
+    store(db, later(HEADER, 120), dirs(e=1500, new=7))
+    query = doc_sql("AS grew").replace("now() - interval '7 days'", "%s")
+    assert "%s" in query
+    since = T0 + timedelta(seconds=60)
+    grew = {path: growth for path, growth, *_ in db.execute(query, (since,))}
+    assert grew == {
+        ROOT: 1507 - 5,
+        b"e": None,  # its rstats before the window were not read
+        b"new": 7,  # created in the window: grew from nothing
+        b"gone": None,  # deleted
+    }
+
+
+def test_documented_tree_removal_indexes_what_it_checks_and_leaves_no_index(db):
+    init_schema(db)
+    other = replace(DEEP, fs_path="/y")
+    store(db, DEEP, INITIAL)
+    store(db, later(DEEP, 60), SECOND)
+    store(db, other, INITIAL)
+    kept = load_baseline(db, tree_key_of(other))
+    indexes = "SELECT count(*) FROM pg_indexes WHERE schemaname = 'trackdir'"
+    before = db.execute(indexes).fetchone()
+    block = doc_sql("DELETE FROM trackdir.tree")
+    # Deleting a sample or a path checks current_dir_state for references,
+    # which no permanent index serves.
+    for column in ("sample_id", "path_id"):
+        assert re.search(
+            rf"CREATE INDEX \w+ ON trackdir.current_dir_state \({column}\)", block
+        )
+    (removed,) = db.execute(
+        "SELECT id FROM trackdir.tree WHERE fs_path = %s", (b"/x",)
+    ).fetchone()
+    assert "tree_id = 3" in block and "WHERE id = 3" in block
+    db.execute(
+        block.replace("tree_id = 3", f"tree_id = {removed}").replace(
+            "WHERE id = 3", f"WHERE id = {removed}"
+        )
+    )
+    assert db.execute(indexes).fetchone() == before
+    assert counts(db) == {
+        "tree": 1,
+        "sample": 1,
+        "path": len(INITIAL),
+        "dir_state": len(INITIAL),
+        "current_dir_state": len(INITIAL),
+    }
+    assert load_baseline(db, tree_key_of(other)) == kept
+    assert_invariants(db)
+
+
+@pytest.mark.parametrize("tree", [None, 1])
+def test_root_totals_are_found_through_indexes(db, tree):
+    init_schema(db)
+    store(db, DEEP, INITIAL)
+    db.execute("SET enable_seqscan = off")  # a scan then shows only if unavoidable
+    plan = db.execute(
+        "EXPLAIN " + db_module._ROOT_NOW, {"tree": tree, "root": ROOT}
+    ).fetchall()
+    scans = [line for (line,) in plan if "Seq Scan on" in line]
+    assert [s for s in scans if "current_dir_state" in s or " path " in s] == []
+
+
+def test_current_size_example_is_found_through_indexes(db):
+    init_schema(db)
+    store(db, DEEP, [DirProbe(ROOT, rbytes=9, rfiles=1, rsubdirs=1)])
+    query = doc_sql("SELECT c.rbytes, c.rfiles, c.rsubdirs")
+    assert db.execute(query).fetchall() == [(9, 1, 1)]
+    db.execute("SET enable_seqscan = off")
+    plan = "".join(line for (line,) in db.execute("EXPLAIN " + query))
+    assert "Seq Scan" not in plan
