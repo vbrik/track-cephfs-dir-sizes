@@ -5,6 +5,7 @@ import time
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from conftest import (
@@ -17,6 +18,7 @@ from conftest import (
 )
 
 from trackdir import dbcli, live, sample
+from trackdir.capture import load_capture, write_capture
 from trackdir.cli import main
 from trackdir.db import (
     SCHEMA_VERSION,
@@ -25,11 +27,13 @@ from trackdir.db import (
     OutOfOrderSample,
     SchemaVersionMismatch,
     TreeKey,
+    TreeMismatch,
+    TreeNamedOtherwise,
     tree_key_of,
 )
 from trackdir.dbcli import describe_tree
 from trackdir.messages import FatalError, paragraph
-from trackdir.model import ROOT, error_counts
+from trackdir.model import ROOT, DirProbe, error_counts
 from trackdir.progress import StatusLine
 from trackdir.sample import (
     SampleOptions,
@@ -93,11 +97,17 @@ def test_replay_walk_at_smaller_depth(subtree):
 @pytest.mark.parametrize(
     ("args", "problem"),
     [
-        (["sample", "r", "--replay", "c", "--db", "x"], "ROOT or --replay"),
-        (["sample", "--db", "x"], "ROOT or --replay"),
-        (["sample", "--replay", "c", "--jobs", "2", "--db", "x"], "--jobs applies"),
-        (["sample", "r", "--db", "x"], "--max-depth is required"),
-        (["sample", "r", "--max-depth", "1"], "no database given"),
+        (
+            ["sample", "--tree", "t", "r", "--replay", "c", "--db", "x"],
+            "ROOT or --replay",
+        ),
+        (["sample", "--tree", "t", "--db", "x"], "ROOT or --replay"),
+        (
+            ["sample", "--tree", "t", "--replay", "c", "--jobs", "2", "--db", "x"],
+            "--jobs applies",
+        ),
+        (["sample", "--tree", "t", "r", "--db", "x"], "--max-depth is required"),
+        (["sample", "--tree", "t", "r", "--max-depth", "1"], "no database given"),
         (["db", "init"], "no database given"),
         (["db"], "required"),
     ],
@@ -119,7 +129,7 @@ def test_dsn_from_environment(monkeypatch, tree):
         raise FatalError("stop")
 
     monkeypatch.setattr(sample, "run_sample", fake_run_sample)
-    assert main(["sample", str(tree), "--max-depth", "1"]) == 1
+    assert main(["sample", "--tree", "t", str(tree), "--max-depth", "1"]) == 1
     assert [o.dsn for o in seen] == ["x"]
     assert seen[0].jobs == live.DEFAULT_JOBS
 
@@ -137,7 +147,7 @@ def test_interrupt_says_nothing_was_stored(monkeypatch, capsys):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(sample, "run_sample", interrupted)
-    assert main(["sample", "--replay", "c", "--db", "x"]) == 130
+    assert main(["sample", "--tree", "t", "--replay", "c", "--db", "x"]) == 130
     assert collapse(capsys.readouterr().err) == (
         "ERROR: interrupted; nothing was stored."
     )
@@ -146,13 +156,28 @@ def test_interrupt_says_nothing_was_stored(monkeypatch, capsys):
 def test_psycopg_missing_message(monkeypatch, tree, fake_ceph, capsys):
     monkeypatch.setitem(sys.modules, "psycopg", None)
     monkeypatch.setattr(live, "walk", must_not_walk)
-    assert main(["sample", str(tree), "--max-depth", "1", "--db", "x"]) == 1
+    assert (
+        main(["sample", "--tree", "t", str(tree), "--max-depth", "1", "--db", "x"]) == 1
+    )
     assert "trackdir[postgres]" in collapse(capsys.readouterr().err)
 
 
 def test_replay_deeper_than_capture_fails(capsys):
     assert (
-        main(["sample", "--replay", str(SUBTREE), "--max-depth", "5", "--db", "x"]) == 1
+        main(
+            [
+                "sample",
+                "--tree",
+                "t",
+                "--replay",
+                str(SUBTREE),
+                "--max-depth",
+                "5",
+                "--db",
+                "x",
+            ]
+        )
+        == 1
     )
     err = collapse(capsys.readouterr().err)
     assert err.startswith("ERROR:")
@@ -173,7 +198,7 @@ def test_replay_of_bad_capture_fails(tmp_path, capsys, content, detail):
     path = tmp_path / "bad.jsonl.gz"
     if content is not None:
         path.write_bytes(content)
-    assert main(["sample", "--replay", str(path), "--db", "x"]) == 1
+    assert main(["sample", "--tree", "t", "--replay", str(path), "--db", "x"]) == 1
     err = collapse(capsys.readouterr().err)
     assert err.startswith(f"ERROR: cannot read the capture {path}: {detail}")
     assert err.count(str(path)) == 1
@@ -263,7 +288,7 @@ def test_conflicts_name_the_tree_as_the_summary_does(
     key = replace(tree_key_of(subtree.header), fs_name=fs_name)
     monkeypatch.setattr(dbcli, "connect", fail_to_connect(conflict(key)))
     with pytest.raises(FatalError) as exc:
-        run_sample(SampleOptions(dsn="x", replay=SUBTREE), print)
+        run_sample(SampleOptions(dsn="x", tree="t", replay=SUBTREE), print)
     tree = describe_tree(key)
     assert collapse(str(exc.value)) == text.format(tree=tree)
     assert tree in collapse(render_sample_summary(sample_result(tree=key)))
@@ -280,7 +305,10 @@ def fail_to_connect(error):
     ("args", "outcome"),
     [
         (["db", "init", "--db", "x"], "The database was not changed."),
-        (["sample", "--replay", str(SUBTREE), "--db", "x"], "Nothing was stored."),
+        (
+            ["sample", "--tree", "t", "--replay", str(SUBTREE), "--db", "x"],
+            "Nothing was stored.",
+        ),
     ],
 )
 def test_database_error_says_what_was_left(monkeypatch, capsys, args, outcome):
@@ -329,7 +357,9 @@ def test_unreachable_database_fails_before_walking(
 ):
     pytest.importorskip("psycopg")
     monkeypatch.setattr(live, "walk", must_not_walk)
-    status = main(["sample", str(tree), "--max-depth", "1", "--db", UNREACHABLE])
+    status = main(
+        ["sample", "--tree", "t", str(tree), "--max-depth", "1", "--db", UNREACHABLE]
+    )
     assert status == 1
     err = capsys.readouterr().err
     assert err.startswith("ERROR: database error")
@@ -350,13 +380,15 @@ def test_db_init_cli(dsn, capsys):
 
 
 def test_sample_without_schema_fails(dsn, capsys):
-    assert main(["sample", "--replay", str(SUBTREE), "--db", dsn]) == 1
+    assert main(["sample", "--tree", "t", "--replay", str(SUBTREE), "--db", dsn]) == 1
     assert "trackdir db init" in collapse(capsys.readouterr().err)
 
 
 def test_replay_stores_initial_sample(db, dsn, subtree):
     sample.run_db_init(dsn)
-    res = run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_dirs=10**5), print)
+    res = run_sample(
+        SampleOptions(dsn=dsn, tree="t", replay=SUBTREE, max_dirs=10**5), print
+    )
     assert res.kind == "initial"
     assert res.dirs == subtree.header.dirs
     assert (res.changed, res.deleted, res.skipped) == (res.dirs, 0, 0)
@@ -381,11 +413,13 @@ def test_replay_stores_initial_sample(db, dsn, subtree):
 
 def test_tree_over_max_dirs_fails_before_walking(db, dsn, subtree, monkeypatch):
     sample.run_db_init(dsn)
-    run_sample(SampleOptions(dsn=dsn, replay=SUBTREE), print)
+    run_sample(SampleOptions(dsn=dsn, tree="t", replay=SUBTREE), print)
     monkeypatch.setattr(sample, "replay_walk", must_not_walk)
     limit = subtree.header.dirs - 1
     with pytest.raises(FatalError) as exc:
-        run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_dirs=limit), print)
+        run_sample(
+            SampleOptions(dsn=dsn, tree="t", replay=SUBTREE, max_dirs=limit), print
+        )
     message = collapse(str(exc.value))
     assert f"more than {limit} directories" in message
     assert message.endswith(sample.SAMPLE_LIMIT_ADVICE)
@@ -393,7 +427,7 @@ def test_tree_over_max_dirs_fails_before_walking(db, dsn, subtree, monkeypatch):
 
 def test_older_replay_is_refused_before_walking(db, dsn, monkeypatch):
     sample.run_db_init(dsn)
-    opts = SampleOptions(dsn=dsn, replay=SUBTREE, max_depth=1)
+    opts = SampleOptions(dsn=dsn, tree="t", replay=SUBTREE, max_depth=1)
     run_sample(opts, print)
     monkeypatch.setattr(sample, "replay_walk", must_not_walk)
     with pytest.raises(FatalError) as exc:
@@ -407,7 +441,7 @@ def test_live_sample_dated_before_latest_is_refused_before_walking(
     db, dsn, tree, fake_ceph, monkeypatch, capsys
 ):
     sample.run_db_init(dsn)
-    args = ["sample", str(tree), "--max-depth", "3", "--db", dsn]
+    args = ["sample", "--tree", "t", str(tree), "--max-depth", "3", "--db", dsn]
     assert main(args) == 0
     db.execute("UPDATE trackdir.sample SET started = '2999-01-01T00:00:00+00:00'")
     capsys.readouterr()
@@ -422,7 +456,9 @@ def test_live_sample_dated_before_latest_is_refused_before_walking(
 
 def test_live_sample_with_fakes(db, dsn, tree, fake_ceph, capsys):
     sample.run_db_init(dsn)
-    assert main(["sample", str(tree), "--max-depth", "2", "--db", dsn]) == 0
+    assert (
+        main(["sample", "--tree", "t", str(tree), "--max-depth", "2", "--db", dsn]) == 0
+    )
     stdout, stderr = capsys.readouterr()
     assert stdout == ""
     assert collapse(stderr).startswith("Stored sample")
@@ -435,7 +471,7 @@ def test_live_sample_with_fakes(db, dsn, tree, fake_ceph, capsys):
 
 def test_live_second_sample_is_pruned_by_the_baseline(db, dsn, tree, fake_ceph, capsys):
     sample.run_db_init(dsn)
-    args = ["sample", str(tree), "--max-depth", "3", "--db", dsn]
+    args = ["sample", "--tree", "t", str(tree), "--max-depth", "3", "--db", dsn]
     assert main(args) == 0
     assert main(args) == 0  # the fake rstats are constant: nothing changed
     first, second = collapse(capsys.readouterr().err).split(" Stored sample ")
@@ -452,7 +488,7 @@ def test_live_second_sample_is_pruned_by_the_baseline(db, dsn, tree, fake_ceph, 
 def test_replay_reports_each_phase(db, dsn):
     sample.run_db_init(dsn)
     stream = Terminal()
-    opts = SampleOptions(dsn=dsn, replay=SUBTREE)
+    opts = SampleOptions(dsn=dsn, tree="t", replay=SUBTREE)
     result = run_sample(opts, print, progress=StatusLine(stream))
     assert status_phases(stream.getvalue()) == [
         "loading the capture",
@@ -469,7 +505,9 @@ def test_live_sample_erases_its_progress_before_the_summary(
     sample.run_db_init(dsn)
     stderr = Terminal()
     monkeypatch.setattr(sys, "stderr", stderr)
-    assert main(["sample", str(tree), "--max-depth", "2", "--db", dsn]) == 0
+    assert (
+        main(["sample", "--tree", "t", str(tree), "--max-depth", "2", "--db", dsn]) == 0
+    )
     progress, summary = stderr.getvalue().rsplit("\r\x1b[K", 1)
     assert status_phases(progress) == [
         "loading the baseline",
@@ -491,5 +529,91 @@ def test_baseline_seconds_times_the_load_not_the_rest_of_the_pre_check(
         real(conn)
 
     monkeypatch.setattr(sample, "check_schema", slow_check)
-    res = run_sample(SampleOptions(dsn=dsn, replay=SUBTREE, max_depth=1), print)
+    res = run_sample(
+        SampleOptions(dsn=dsn, tree="t", replay=SUBTREE, max_depth=1), print
+    )
     assert 0 < res.baseline_seconds < 0.3
+
+
+# Tree names
+
+
+def other_tree_capture(tmp_path) -> Path:
+    """A one-directory capture of another directory than SUBTREE's."""
+    header = replace(
+        load_capture(SUBTREE).header,
+        fs_path="/elsewhere",
+        max_depth=0,
+        dirs=1,
+        errors=0,
+    )
+    path = tmp_path / "other.jsonl.gz"
+    write_capture(path, header, [DirProbe(ROOT, rbytes=1, rfiles=1, rsubdirs=1)])
+    return path
+
+
+def test_replay_under_the_name_of_another_tree_is_refused_before_walking(
+    db, dsn, tmp_path, monkeypatch
+):
+    sample.run_db_init(dsn)
+    run_sample(SampleOptions(dsn=dsn, tree="live", replay=SUBTREE), print)
+    other = other_tree_capture(tmp_path)
+    monkeypatch.setattr(sample, "replay_walk", must_not_walk)
+    with pytest.raises(FatalError) as exc:
+        run_sample(
+            SampleOptions(dsn=dsn, tree="live", replay=other, max_depth=0), print
+        )
+    message = collapse(str(exc.value))
+    assert message.startswith("tree live is recorded in the database as (cluster ")
+    recorded = load_capture(SUBTREE).header.fs_path
+    assert f"fs path differs (recorded {recorded}, found /elsewhere)" in message
+    assert "depth differs (recorded 4, found 0)" in message
+    assert "nothing was stored" in message
+    assert '"Changed mount" in docs/schema.md' in message
+    assert db.execute(
+        "SELECT count(*) FROM trackdir.dir_state WHERE deleted"
+    ).fetchone() == (0,)
+    assert db.execute("SELECT count(*) FROM trackdir.sample").fetchone() == (1,)
+
+
+def test_tree_mismatch_message_names_only_the_differing_field():
+    recorded = TreeKey("fsid", None, b"/x", 2)
+    error = TreeMismatch("projects", recorded, replace(recorded, fs_name="cephfs"))
+    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    assert "fs name differs (recorded none, found cephfs)" in message
+    assert message.count(" differs ") == 1
+
+
+def test_tree_named_otherwise_message_names_the_other_tree():
+    error = TreeNamedOtherwise("b", "a", TreeKey("fsid", None, b"/x", 2))
+    message = dbcli._db_message(error, dbcli.NOTHING_STORED)
+    assert "is already recorded as tree a, not b; nothing was stored" in message
+    assert message.endswith("use the name a.")
+
+
+def test_sample_requires_a_tree_name(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["sample", "r", "--max-depth", "1", "--db", "x"])
+    assert exc.value.code == 2
+    assert "--tree" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["a b", "", "-x", "a/b", "a" * 65])
+def test_sample_rejects_a_malformed_tree_name(capsys, name):
+    with pytest.raises(SystemExit) as exc:
+        main(["sample", "r", "--max-depth", "1", "--db", "x", f"--tree={name}"])
+    assert exc.value.code == 2
+    err = collapse(capsys.readouterr().err)
+    assert "a tree name is 1 to 64 characters" in err
+
+
+def test_live_sample_under_a_known_name_at_another_depth_is_refused(
+    db, dsn, tree, fake_ceph, capsys
+):
+    sample.run_db_init(dsn)
+    args = ["sample", str(tree), "--db", dsn, "--tree", "t"]
+    assert main([*args, "--max-depth", "2"]) == 0
+    assert main([*args, "--max-depth", "3"]) == 1
+    err = collapse(capsys.readouterr().err)
+    assert "depth differs (recorded 2, found 3)" in err
+    assert db.execute("SELECT count(*) FROM trackdir.tree").fetchone() == (1,)

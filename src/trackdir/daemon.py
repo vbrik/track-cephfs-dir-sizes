@@ -149,7 +149,10 @@ def inspect_trees(
                     )
                 )
         _check_distinct(config, keys)
-        return tuple(latest_started(conn, key) for key in keys)
+        return tuple(
+            latest_started(conn, tree.name, key)
+            for tree, key in zip(config.trees, keys, strict=True)
+        )
 
 
 def run_cycles(
@@ -295,6 +298,7 @@ def _sample_tree(
     """
     opts = SampleOptions(
         dsn=config.dsn,
+        tree=tree.name,
         root=tree.root,
         max_depth=tree.max_depth,
         max_dirs=tree.max_dirs,

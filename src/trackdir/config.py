@@ -31,7 +31,7 @@ _LOG_LEVELS = {
     "ERROR": logging.ERROR,
 }
 _TOP_KEYS = {"interval", "db", "log_level", "tree"}
-_TREE_KEYS = {"root", "max_depth", "max_dirs", "jobs"}
+_TREE_KEYS = {"name", "root", "max_depth", "max_dirs", "jobs"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +46,7 @@ class Interval:
 class TreeConfig:
     """One [[tree]] entry; the fields mean what `trackdir sample` options do."""
 
+    name: str  # the tree's name, as `trackdir sample --tree`
     root: Path
     max_depth: int
     max_dirs: int = DEFAULT_MAX_DIRS
@@ -117,7 +118,11 @@ def _tree(path: Path, n: int, data: Mapping[str, Any]) -> TreeConfig:
     if not os.path.isabs(root):
         raise FatalError(f"{path}: {where}root must be an absolute path: {root!r}.")
     max_depth = _required(path, where, data, "max_depth")
+    name = _required(path, where, data, "name")
+    if not isinstance(name, str):
+        raise FatalError(f"{path}: {where}name must be a string: {name!r}.")
     return TreeConfig(
+        name=name,
         root=Path(root),
         max_depth=_integer(path, where, "max_depth", max_depth, 0, MAX_DEPTH_LIMIT),
         max_dirs=_integer(

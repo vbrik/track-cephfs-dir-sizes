@@ -13,6 +13,7 @@ interval = "6h"
 db = "postgresql://x/y"
 
 [[tree]]
+name = "a"
 root = "/mnt/cephfs/a"
 max_depth = 2
 """
@@ -22,10 +23,12 @@ interval = "6h"
 db = "postgresql://x/y"
 
 [[tree]]
+name = "a"
 root = "/mnt/cephfs/a"
 max_depth = 2
 
 [[tree]]
+name = "b"
 root = "/mnt/cephfs/b"
 {second}
 """
@@ -70,7 +73,7 @@ def test_load_minimal(tmp_path):
         Interval(21600, "6h"),
         "postgresql://x/y",
         logging.INFO,
-        (TreeConfig(Path("/mnt/cephfs/a"), 2),),
+        (TreeConfig("a", Path("/mnt/cephfs/a"), 2),),
     )
     tree = load(path).trees[0]
     assert tree.max_dirs == live.DEFAULT_MAX_DIRS
@@ -83,8 +86,8 @@ def test_load_full(tmp_path):
     config = load(path)
     assert config.log_level == logging.DEBUG
     assert config.trees == (
-        TreeConfig(Path("/mnt/cephfs/a"), 2),
-        TreeConfig(Path("/mnt/cephfs/b"), 4, max_dirs=1000, jobs=3),
+        TreeConfig("a", Path("/mnt/cephfs/a"), 2),
+        TreeConfig("b", Path("/mnt/cephfs/b"), 4, max_dirs=1000, jobs=3),
     )
 
 
@@ -105,6 +108,7 @@ def test_db_key_overrides_environment(tmp_path, monkeypatch):
 
 def _tree(**keys: str) -> str:
     """Return MINIMAL with tree 1's keys replaced by KEYS (TOML values)."""
+    keys = {"name": '"a"'} | keys
     body = "".join(f"{key} = {value}\n" for key, value in keys.items())
     return 'interval = "6h"\ndb = "postgresql://x/y"\n\n[[tree]]\n' + body
 
@@ -122,7 +126,7 @@ REJECTED = [
     ("no_max_depth", _tree(root='"/a"'), ["max_depth"]),
     (
         "tree_table",
-        'interval = "6h"\ndb = "x"\n[tree]\nroot = "/a"\nmax_depth = 1\n',
+        'interval = "6h"\ndb = "x"\n[tree]\nname = "a"\nroot = "/a"\nmax_depth = 1\n',
         ["tree"],
     ),
     ("tree_empty", 'interval = "6h"\ndb = "x"\ntree = []\n', ["tree"]),

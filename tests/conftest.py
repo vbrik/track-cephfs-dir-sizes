@@ -1,4 +1,7 @@
+import gzip
+import hashlib
 import io
+import json
 import os
 from collections import Counter
 from collections.abc import Sequence
@@ -9,8 +12,15 @@ from pathlib import Path
 import pytest
 
 from trackdir import live
-from trackdir.capture import Capture, is_listed, load_capture, write_capture
-from trackdir.db import TreeKey
+from trackdir.capture import (
+    Capture,
+    CaptureHeader,
+    _header_from_json,
+    is_listed,
+    load_capture,
+    write_capture,
+)
+from trackdir.db import TreeKey, tree_key_of
 from trackdir.model import ROOT, DirProbe, RStats, path_depth, split, tree_key
 from trackdir.mount import CephMount
 from trackdir.rstats import RStatMode
@@ -231,8 +241,28 @@ def edited_capture(
     return out
 
 
-def replay(dsn: str, capture: Path, **options) -> SampleResult:
-    return run_sample(SampleOptions(dsn=dsn, replay=capture, **options), print)
+def name_of(tree: CaptureHeader | TreeKey) -> str:
+    """Return a tree name for tests that do not care about names.
+
+    Equal mount identities get the same name and different ones different
+    names, so such tests keep meaning what they meant before trees had names.
+    """
+    key = tree if isinstance(tree, TreeKey) else tree_key_of(tree)
+    return "t-" + hashlib.sha1(repr(key).encode()).hexdigest()[:12]
+
+
+def replay(
+    dsn: str, capture: Path, *, tree: str | None = None, **options
+) -> SampleResult:
+    """Store CAPTURE as a sample of tree TREE (default: name_of its identity)."""
+    if tree is None:
+        with gzip.open(capture) as lines:  # the header alone: captures are big
+            header = _header_from_json(json.loads(lines.readline()))
+        depth = options.get("max_depth")
+        tree = name_of(header if depth is None else replace(header, max_depth=depth))
+    return run_sample(
+        SampleOptions(dsn=dsn, tree=tree, replay=capture, **options), print
+    )
 
 
 def later(capture: Capture, hours: float = 1) -> str:
@@ -245,6 +275,7 @@ def sample_result(**changes) -> SampleResult:
     """Return a SampleResult with placeholder values, CHANGES applied."""
     fields = {
         "sample_id": 7,
+        "name": "x",
         "root": "/mnt/cephfs/x",
         "tree": TreeKey("fsid", None, b"/x", 2),
         "max_depth": 2,

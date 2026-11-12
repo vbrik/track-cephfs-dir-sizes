@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import SUBTREE, assert_invariants
+from conftest import SUBTREE, assert_invariants, name_of
 
 from trackdir import db as db_module
 from trackdir.baseline import ROW_COLUMNS, Baseline, diff
@@ -24,6 +24,8 @@ from trackdir.db import (
     SchemaMissing,
     SchemaVersionMismatch,
     TreeKey,
+    TreeMismatch,
+    TreeNamedOtherwise,
     check_order,
     check_schema,
     connect,
@@ -33,6 +35,7 @@ from trackdir.db import (
     load_baseline,
     store_sample,
     tree_key_of,
+    valid_tree_name,
 )
 from trackdir.model import (
     ROOT,
@@ -94,15 +97,20 @@ def store(
     baseline: Baseline | None = None,
     replayed_from: str | None = None,
     baseline_seconds: float = 0.0,
+    name: str | None = None,
 ) -> int:
-    """Store PROBES as a sample of HEADER's tree against BASELINE (default: loaded)."""
+    """Store PROBES as a sample of HEADER's tree against BASELINE (default: loaded).
+
+    The tree is named NAME, by default name_of its mount identity.
+    """
     key = tree_key_of(header)
+    name = name_of(key) if name is None else name
     if baseline is None:
-        baseline = load_baseline(conn, key)
+        baseline = load_baseline(conn, name, key)
     started = datetime.fromisoformat(header.started)
     sample_diff = diff(baseline, probes, header.max_depth, started)
     return store_sample(
-        conn, header, key, baseline, sample_diff, replayed_from, baseline_seconds
+        conn, name, header, key, baseline, sample_diff, replayed_from, baseline_seconds
     )
 
 
@@ -214,7 +222,14 @@ def test_store_sample_refuses_a_key_of_another_tree():
     empty = diff(Baseline.empty(), (), HEADER.max_depth, T0)
     with pytest.raises(ValueError, match="not the tree of the header"):
         store_sample(
-            None, HEADER, replace(key, max_depth=2), Baseline.empty(), empty, None, 0.0
+            None,
+            "x",
+            HEADER,
+            replace(key, max_depth=2),
+            Baseline.empty(),
+            empty,
+            None,
+            0.0,
         )
 
 
@@ -287,29 +302,36 @@ def test_store_round_trip(db):
 def test_load_baseline_empty_for_unknown_tree_and_for_tree_without_samples(db):
     init_schema(db)
     key = tree_key_of(HEADER)
-    assert load_baseline(db, key) == Baseline.empty()
+    assert load_baseline(db, name_of(key), key) == Baseline.empty()
     db.execute(
-        "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
-        " VALUES (%s, %s, %s, %s)",
-        (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
+        "INSERT INTO trackdir.tree (name, cluster_fsid, fs_name, fs_path, max_depth)"
+        " VALUES (%s, %s, %s, %s, %s)",
+        (name_of(key), key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
     )
-    assert load_baseline(db, key) == Baseline.empty()
+    assert load_baseline(db, name_of(key), key) == Baseline.empty()
 
 
 def test_latest_started(db):
     init_schema(db)
     key = tree_key_of(HEADER)
-    assert latest_started(db, key) is None
+    assert latest_started(db, name_of(key), key) is None
     db.execute(
-        "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
-        " VALUES (%s, %s, %s, %s)",
-        (key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
+        "INSERT INTO trackdir.tree (name, cluster_fsid, fs_name, fs_path, max_depth)"
+        " VALUES (%s, %s, %s, %s, %s)",
+        (name_of(key), key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth),
     )
-    assert latest_started(db, key) is None
+    assert latest_started(db, name_of(key), key) is None
     store(db, HEADER)
     store(db, later(HEADER, 60))
-    assert latest_started(db, key) == T0 + timedelta(seconds=60)
-    assert latest_started(db, tree_key_of(replace(HEADER, max_depth=3))) is None
+    assert latest_started(db, name_of(key), key) == T0 + timedelta(seconds=60)
+    assert (
+        latest_started(
+            db,
+            name_of(tree_key_of(replace(HEADER, max_depth=3))),
+            tree_key_of(replace(HEADER, max_depth=3)),
+        )
+        is None
+    )
 
 
 # A tree to depth 2 (ROOT, a, a/b) and its second sample, which changes a and
@@ -331,7 +353,7 @@ def test_load_baseline_returns_latest_state_per_path(db):
     store(db, DEEP, INITIAL)
     second = later(DEEP, 60)
     second_id = store(db, second, SECOND)
-    baseline = load_baseline(db, tree_key_of(DEEP))
+    baseline = load_baseline(db, name_of(tree_key_of(DEEP)), tree_key_of(DEEP))
     assert baseline.sample_id == second_id
     assert baseline.started == datetime.fromisoformat(second.started)
     assert baseline.rows == {
@@ -344,9 +366,11 @@ def test_load_baseline_stops_past_max_dirs(db):
     init_schema(db)
     store(db, DEEP, INITIAL)
     key = tree_key_of(DEEP)
-    assert len(load_baseline(db, key, max_dirs=len(INITIAL)).rows) == len(INITIAL)
+    assert len(load_baseline(db, name_of(key), key, max_dirs=len(INITIAL)).rows) == len(
+        INITIAL
+    )
     with pytest.raises(DirLimitExceeded) as exc:
-        load_baseline(db, key, max_dirs=len(INITIAL) - 1)
+        load_baseline(db, name_of(key), key, max_dirs=len(INITIAL) - 1)
     assert exc.value.limit == len(INITIAL) - 1
 
 
@@ -422,7 +446,7 @@ def test_stale_baseline_is_refused(db):
     init_schema(db)
     key = tree_key_of(HEADER)
     store(db, HEADER, [DirProbe(ROOT, rctime=1)])
-    stale = load_baseline(db, key)
+    stale = load_baseline(db, name_of(key), key)
     store(db, later(HEADER, 60), [DirProbe(ROOT, rctime=2)])
     after = counts(db)
     with pytest.raises(ConcurrentSample) as exc:
@@ -448,7 +472,7 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
     init_schema(db)
     key = tree_key_of(HEADER)
     first_id = store(db, HEADER, [DirProbe(ROOT, rctime=1)])
-    baseline = load_baseline(db, key)
+    baseline = load_baseline(db, name_of(key), key)
     loser_header = later(HEADER, 120)
     loser_diff = diff(baseline, [DirProbe(ROOT, rctime=3)], HEADER.max_depth, T0)
     dsn = os.environ["TRACKDIR_TEST_DSN"]
@@ -476,6 +500,7 @@ def test_stale_baseline_is_refused_under_a_repeatable_read_default(db):
                 pending = pool.submit(
                     store_sample,
                     loser,
+                    name_of(key),
                     loser_header,
                     key,
                     baseline,
@@ -538,7 +563,7 @@ def test_trees_differ_by_depth_fs_name_and_fs_path(db):
         store(db, header, [DirProbe(ROOT, ino=ino)])
     assert counts(db)["tree"] == len(trees)
     for ino, header in enumerate(trees):
-        baseline = load_baseline(db, tree_key_of(header))
+        baseline = load_baseline(db, name_of(tree_key_of(header)), tree_key_of(header))
         assert baseline.rows == {ROOT: (ino,) + (None,) * (len(ROW_COLUMNS) - 1)}
     # Two NULL fs_names with equal other fields are one tree.
     store(db, later(HEADER, 60), [DirProbe(ROOT, ino=99)])
@@ -554,7 +579,7 @@ def test_awkward_values_round_trip(db):
     ]
     sample_id = store(db, HEADER, probes)
     assert read_sample(db, sample_id) == probes
-    baseline = load_baseline(db, tree_key_of(HEADER))
+    baseline = load_baseline(db, name_of(tree_key_of(HEADER)), tree_key_of(HEADER))
     assert diff(baseline, probes, HEADER.max_depth, T0).changed == []
 
 
@@ -666,8 +691,12 @@ def test_trees_with_the_same_relative_path_are_separate(db):
     assert len({tree for tree, _ in paths}) == len({i for _, i in paths}) == 2
     store(db, later(HEADER, 60), dirs())  # a is deleted in the first tree only
     assert_invariants(db)
-    assert load_baseline(db, tree_key_of(HEADER)).rows.keys() == {ROOT}
-    assert load_baseline(db, tree_key_of(other)).rows.keys() == {ROOT, b"a"}
+    assert load_baseline(
+        db, name_of(tree_key_of(HEADER)), tree_key_of(HEADER)
+    ).rows.keys() == {ROOT}
+    assert load_baseline(
+        db, name_of(tree_key_of(other)), tree_key_of(other)
+    ).rows.keys() == {ROOT, b"a"}
 
 
 def test_two_samples_on_one_connection_and_an_empty_one(db):
@@ -781,7 +810,7 @@ def test_documented_tree_removal_indexes_what_it_checks_and_leaves_no_index(db):
     store(db, DEEP, INITIAL)
     store(db, later(DEEP, 60), SECOND)
     store(db, other, INITIAL)
-    kept = load_baseline(db, tree_key_of(other))
+    kept = load_baseline(db, name_of(tree_key_of(other)), tree_key_of(other))
     indexes = "SELECT count(*) FROM pg_indexes WHERE schemaname = 'trackdir'"
     before = db.execute(indexes).fetchone()
     block = doc_sql("DELETE FROM trackdir.tree")
@@ -808,7 +837,7 @@ def test_documented_tree_removal_indexes_what_it_checks_and_leaves_no_index(db):
         "dir_state": len(INITIAL),
         "current_dir_state": len(INITIAL),
     }
-    assert load_baseline(db, tree_key_of(other)) == kept
+    assert load_baseline(db, name_of(tree_key_of(other)), tree_key_of(other)) == kept
     assert_invariants(db)
 
 
@@ -832,3 +861,192 @@ def test_current_size_example_is_found_through_indexes(db):
     db.execute("SET enable_seqscan = off")
     plan = "".join(line for (line,) in db.execute("EXPLAIN " + query))
     assert "Seq Scan" not in plan
+
+
+# Tree names: a name stands for one mount identity
+
+
+def tree_rows(conn) -> list[tuple]:
+    return conn.execute(
+        "SELECT id, name, cluster_fsid, fs_name, fs_path, max_depth"
+        " FROM trackdir.tree ORDER BY id"
+    ).fetchall()
+
+
+def test_new_name_and_new_identity_create_a_tree(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    key = tree_key_of(HEADER)
+    assert tree_rows(db) == [
+        (1, "projects", key.cluster_fsid, key.fs_name, key.fs_path, key.max_depth)
+    ]
+
+
+def test_known_name_with_its_identity_continues_the_tree(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    second = store(db, later(HEADER, 60), dirs(a=2), name="projects")
+    assert len(tree_rows(db)) == 1
+    assert db.execute(
+        "SELECT new_dirs, modified_dirs FROM trackdir.sample WHERE id = %s", (second,)
+    ).fetchone() == (0, 2)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"fs_name": "cephfs"},
+        {"fs_path": "/y"},
+        {"max_depth": 2},
+        {"cluster_fsid": "11111111-1111-4111-8111-111111111111"},
+    ],
+)
+def test_known_name_with_another_identity_is_refused(db, change):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    before = counts(db)
+    changed = later(HEADER, 60, **change)
+    key = tree_key_of(changed)
+    attempts = [
+        lambda: load_baseline(db, "projects", key),
+        lambda: latest_started(db, "projects", key),
+        lambda: store(
+            db, changed, dirs(a=2), name="projects", baseline=Baseline.build(1, T0, {})
+        ),
+    ]
+    for attempt in attempts:
+        with pytest.raises(TreeMismatch) as exc:
+            attempt()
+        assert exc.value.name == "projects"
+        assert exc.value.recorded == tree_key_of(HEADER)
+        assert exc.value.found == key
+    assert counts(db) == before
+
+
+def test_new_name_for_a_recorded_identity_is_refused(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    before = counts(db)
+    key = tree_key_of(HEADER)
+    attempts = [
+        lambda: load_baseline(db, "other", key),
+        lambda: latest_started(db, "other", key),
+        lambda: store(
+            db, later(HEADER, 60), dirs(a=2), name="other", baseline=Baseline.empty()
+        ),
+    ]
+    for attempt in attempts:
+        with pytest.raises(TreeNamedOtherwise) as exc:
+            attempt()
+        assert (exc.value.name, exc.value.other) == ("other", "projects")
+        assert exc.value.key == key
+    assert counts(db) == before
+
+
+def test_unknown_tree_has_an_empty_baseline_and_no_latest_sample(db):
+    init_schema(db)
+    key = tree_key_of(HEADER)
+    assert load_baseline(db, "projects", key) == Baseline.empty()
+    assert latest_started(db, "projects", key) is None
+    assert tree_rows(db) == []
+
+
+def test_documented_update_makes_a_name_stand_for_a_new_identity(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="projects")
+    assert HEADER.fs_name is None
+    db.execute(doc_sql("UPDATE trackdir.tree"))
+    remounted = later(HEADER, 60, fs_name="cephfs")
+    second = store(db, remounted, dirs(a=2), name="projects")
+    assert [row[:2] for row in tree_rows(db)] == [(1, "projects")]
+    assert db.execute(
+        "SELECT tree_id, new_dirs, modified_dirs FROM trackdir.sample WHERE id = %s",
+        (second,),
+    ).fetchone() == (1, 0, 2)
+    with pytest.raises(TreeMismatch):
+        store(db, later(HEADER, 120), dirs(a=3), name="projects")
+    assert_invariants(db)
+
+
+@pytest.mark.parametrize(
+    ("rival_name", "rival_path", "refusal"),
+    [("projects", b"/elsewhere", TreeMismatch), ("other", b"/x", TreeNamedOtherwise)],
+)
+def test_racing_first_samples_make_one_tree(db, rival_name, rival_path, refusal):
+    """A tree row inserted while the store waits is judged by the rules, not
+    met as a unique violation."""
+    init_schema(db)
+    key = tree_key_of(HEADER)
+    assert key.fs_path == b"/x"
+    probes = dirs(a=1)
+    sample_diff = diff(Baseline.empty(), probes, HEADER.max_depth, T0)
+    dsn = os.environ["TRACKDIR_TEST_DSN"]
+    with (
+        connect(dsn) as rival,
+        connect(dsn) as loser,
+        ThreadPoolExecutor(max_workers=1) as pool,
+    ):
+        with rival.transaction():
+            rival.execute(
+                "INSERT INTO trackdir.tree"
+                " (name, cluster_fsid, fs_name, fs_path, max_depth)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (rival_name, key.cluster_fsid, None, rival_path, key.max_depth),
+            )
+            pending = pool.submit(
+                store_sample,
+                loser,
+                "projects",
+                HEADER,
+                key,
+                Baseline.empty(),
+                sample_diff,
+                None,
+                0.0,
+            )
+            _wait_for_lock_wait(db, loser.info.backend_pid)
+        with pytest.raises(refusal):
+            pending.result(timeout=10)
+    assert [row[1] for row in tree_rows(db)] == [rival_name]
+    assert counts(db) == {**NOTHING_STORED, "tree": 1}
+
+
+BAD_NAMES = ["", "a" * 65, "-a", ".a", "a b", "a/b", "caf\u00e9", "a\n"]
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_malformed_names_are_not_valid(name):
+    assert not valid_tree_name(name)
+
+
+@pytest.mark.parametrize("name", ["a", "A1", "9", "proj.2026_raw-x", "a" * 64])
+def test_well_formed_names_are_valid(name):
+    assert valid_tree_name(name)
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_the_database_rejects_a_malformed_name(db, name):
+    import psycopg
+
+    init_schema(db)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(
+            "INSERT INTO trackdir.tree (name, cluster_fsid, fs_path, max_depth)"
+            " VALUES (%s, 'f', '/', 0)",
+            (name,),
+        )
+
+
+def test_names_differing_in_case_are_two_trees(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1), name="Proj")
+    store(db, replace(HEADER, fs_path="/y"), dirs(a=1), name="proj")
+    assert [row[1] for row in tree_rows(db)] == ["Proj", "proj"]
+
+
+def test_latest_sample_of_a_tree_is_found_through_an_index(db):
+    init_schema(db)
+    store(db, HEADER, dirs(a=1))
+    db.execute("SET enable_seqscan = off")
+    plan = db.execute("EXPLAIN " + db_module._LATEST_SAMPLE, (1,)).fetchall()
+    assert [line for (line,) in plan if "Seq Scan" in line or "Sort" in line] == []

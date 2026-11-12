@@ -36,9 +36,10 @@ version 5 on, every change ships an upgrade step (see
 - **A tree's samples are ordered by `(started, id)`**; the latest has the
   greatest. trackdir stores a sample only if it started after the tree's
   latest, so `id` order agrees.
-- **Pick a tree.** The same directory sampled with another `max_depth` is
-  another tree, with its own samples; nothing links the two. So is a replayed
-  anonymized capture of it, whose fsid and paths are tokens.
+- **Pick a tree by its name** (`tree.name`). The same directory sampled with
+  another `max_depth` is another tree, with another name and its own samples;
+  nothing links the two. So is a replayed anonymized capture of it, whose
+  fsid and paths are tokens.
 - **Paths are `bytea`**: the filesystem's bytes, which need not be valid
   UTF-8. Decode them as your platform decodes file names (Python:
   `os.fsdecode`). In SQL, write a path as `convert_to('proj/2019', 'UTF8')`.
@@ -47,15 +48,20 @@ version 5 on, every change ships an upgrade step (see
 
 ### `tree`
 
-A directory of a CephFS filesystem, sampled to one depth; the same tree whatever
-host or mount point samples it, as long as every mount names the filesystem
-the same way (see `fs_name`). The four identity columns are unique together.
+A directory of a CephFS filesystem, sampled to one depth, under the name its
+user gave it. The four columns after `name` are its **mount identity**: what
+the mount said the tree was when it was created. They are unique together,
+and trackdir stores a sample of a tree only if the mount still says the same
+(see [Changed mount](#changed-mount)). The identity does not depend on the
+host or the mount point, as long as every mount names the filesystem the same
+way (see `fs_name`).
 
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | bigint | Primary key. |
+| `name` | text | The tree's name, unique: 1 to 64 characters of `A-Z a-z 0-9 . _ -`, the first a letter or digit. Case matters. |
 | `cluster_fsid` | text | Ceph cluster fsid. |
-| `fs_name` | text | CephFS filesystem name as the mount names it; NULL: the mount did not name one, so it is the cluster's default. A mount that names the default filesystem gives another tree. |
+| `fs_name` | text | CephFS filesystem name as the mount names it; NULL: the mount did not name one, so it is the cluster's default. A mount that names the default filesystem has another identity. |
 | `fs_path` | bytea | The directory's absolute path inside the filesystem; `/` is its root. |
 | `max_depth` | integer | Deepest level sampled; ROOT is depth 0. |
 
@@ -236,6 +242,25 @@ sampling as it fails with "permission denied" and stores nothing:
 GRANT USAGE ON SCHEMA trackdir TO reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA trackdir TO reader;
 ```
+
+### Changed mount
+
+A tree's name stands for the mount identity recorded in its `tree` row.
+`trackdir sample` and `trackdir daemon` refuse a tree whose mount says
+something else, and their message lists the fields that differ. Usually that
+means ROOT or the mount is wrong, or the directory deserves a new name.
+
+When it is the same directory and only the mount changed, typically because
+another host names the filesystem in its mount and the first did not, record
+the new identity by hand, while nothing samples the tree:
+
+```sql
+UPDATE trackdir.tree SET fs_name = 'cephfs' WHERE name = 'projects';
+```
+
+Do this only for the same directory. The next sample is compared with the
+stored current state: pointed at another directory, it would record every
+stored directory as deleted and every found one as new.
 
 ### Removing a tree
 

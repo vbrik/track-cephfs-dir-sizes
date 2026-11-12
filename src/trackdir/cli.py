@@ -13,6 +13,7 @@ from pathlib import Path
 from trackdir import __version__, daemon, dbcli, sample, summary
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
+from trackdir.db import TREE_NAME_RULE, valid_tree_name
 from trackdir.interrupts import Terminated, terminate_on_signals
 from trackdir.live import (
     DEFAULT_JOBS,
@@ -313,6 +314,7 @@ def _prepare_sample(args: argparse.Namespace) -> _Command:
         error("--max-depth is required with ROOT")
     opts = sample.SampleOptions(
         dsn=_dsn(args),
+        tree=args.tree,
         root=args.root,
         replay=args.replay,
         max_depth=args.max_depth,
@@ -438,6 +440,13 @@ def _warner(progress: StatusLine) -> Callable[[str], None]:
     return warn
 
 
+def _tree_name(text: str) -> str:
+    """Return TEXT if it can name a tree; raises ArgumentTypeError."""
+    if not valid_tree_name(text):
+        raise argparse.ArgumentTypeError(f"a tree name is {TREE_NAME_RULE}: {text!r}")
+    return text
+
+
 def _int_between(minimum: int, maximum: int | None = None) -> Callable[[str], int]:
     """Return an argparse type for integers >= MINIMUM and, if given, <= MAXIMUM."""
 
@@ -507,6 +516,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="CAPTURE",
         help="read the directories from the capture file CAPTURE instead of ROOT",
+    )
+    sample_parser.add_argument(
+        "--tree",
+        type=_tree_name,
+        required=True,
+        metavar="NAME",
+        help="the tree's name: a new one starts a tree, a known one must "
+        f"still be this directory and depth; {TREE_NAME_RULE}",
     )
     _add_max_depth(
         sample_parser, required=False, note="; default with --replay: the capture's"

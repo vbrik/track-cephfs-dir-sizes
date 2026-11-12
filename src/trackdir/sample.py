@@ -68,6 +68,7 @@ class SampleOptions:
     """
 
     dsn: str
+    tree: str  # the tree's name
     root: Path | None = None
     replay: Path | None = None
     max_depth: int | None = None
@@ -80,6 +81,7 @@ class SampleResult:
     """Outcome of a stored sample."""
 
     sample_id: int
+    name: str  # of the tree
     root: str  # resolved ROOT of the run that read the filesystem
     tree: TreeKey
     max_depth: int
@@ -174,6 +176,7 @@ def run_sample(
     with database(opts.dsn, NOTHING_STORED) as conn:
         sample_id = store_sample(
             conn,
+            opts.tree,
             header,
             walked.key,
             baseline,
@@ -183,6 +186,7 @@ def run_sample(
         )
     return SampleResult(
         sample_id=sample_id,
+        name=opts.tree,
         root=header.root,
         tree=walked.key,
         max_depth=header.max_depth,
@@ -337,7 +341,7 @@ def _precheck(
         check_schema(conn)
         clock = time.monotonic()
         try:
-            baseline = load_baseline(conn, key, max_dirs=opts.max_dirs)
+            baseline = load_baseline(conn, opts.tree, key, max_dirs=opts.max_dirs)
         except DirLimitExceeded as e:
             raise FatalError(
                 f"the {describe_tree(key)} had more than {e.limit} directories "

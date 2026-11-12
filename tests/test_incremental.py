@@ -16,6 +16,7 @@ from conftest import (
     edited_capture,
     later,
     must_not_walk,
+    name_of,
     replay,
 )
 
@@ -343,7 +344,8 @@ def test_second_sample_prints_incremental_summary(
     path = edited_capture(
         subtree, tmp_path / "second.jsonl.gz", started=later(subtree), touch=[deep]
     )
-    assert main(["sample", "--replay", str(path), "--db", dsn]) == 0
+    name = name_of(subtree.header)
+    assert main(["sample", "--tree", name, "--replay", str(path), "--db", dsn]) == 0
     stdout, stderr = capsys.readouterr()
     assert stdout == ""
     assert collapse(stderr).startswith("Stored sample 2 (incremental): probed")

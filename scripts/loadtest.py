@@ -35,6 +35,7 @@ from trackdir.db import (
 )
 from trackdir.model import ROOT, DirProbe
 
+TREE = "loadtest"  # the name of the synthetic tree
 FIRST_START = datetime(2030, 1, 1, tzinfo=UTC)  # samples are an hour apart
 COLUMNS = (
     "sample",
@@ -172,7 +173,9 @@ def run(args: argparse.Namespace) -> None:
             header = header_of(sample, args.depth)
             key = tree_key_of(header)
             clock = time.monotonic()
-            baseline = Baseline.empty() if sample == 1 else load_baseline(conn, key)
+            baseline = (
+                Baseline.empty() if sample == 1 else load_baseline(conn, TREE, key)
+            )
             baseline_seconds = time.monotonic() - clock
             # Only the baseline's sample matters to the store; drop its rows
             # before building the sample's own.
@@ -181,7 +184,7 @@ def run(args: argparse.Namespace) -> None:
             )
             diff = changes(sample, args, rng)
             sample_id = store_sample(
-                conn, header, key, baseline, diff, None, baseline_seconds
+                conn, TREE, header, key, baseline, diff, None, baseline_seconds
             )
             if sample in (1, args.samples) or sample % args.report_every == 0:
                 live, paths, rows, loaded, stored, size = conn.execute(

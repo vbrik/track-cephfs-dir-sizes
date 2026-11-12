@@ -14,6 +14,8 @@ from trackdir.db import (
     SchemaMissing,
     SchemaVersionMismatch,
     TreeKey,
+    TreeMismatch,
+    TreeNamedOtherwise,
     connect,
 )
 from trackdir.messages import FatalError
@@ -81,6 +83,22 @@ def _db_message(e: DbError, unchanged: str) -> str:
                 f"trackdir with this database, or have an administrator "
                 f"{_DROP_AND_INIT}"
             )
+        case TreeMismatch(name=name, recorded=recorded, found=found):
+            return (
+                f"tree {name} is recorded in the database as "
+                f"({tree_identity(recorded)}), but what is being sampled is "
+                f"({tree_identity(found)}): {_differences(recorded, found)}; "
+                f"{unchanged}. If ROOT or its mount is wrong, fix it. If this is "
+                "another directory or depth, give it another tree name. If it is "
+                'the same directory mounted differently, see "Changed mount" '
+                "in docs/schema.md."
+            )
+        case TreeNamedOtherwise(name=name, other=other, key=key):
+            return (
+                f"the {describe_tree(key)} is already recorded as tree {other}, "
+                f"not {name}; {unchanged}. A directory sampled to one depth is "
+                f"one tree: use the name {other}."
+            )
         case ConcurrentSample(key=key):
             return (
                 f"another sample of the {describe_tree(key)} was stored while this "
@@ -100,6 +118,26 @@ def _db_message(e: DbError, unchanged: str) -> str:
             if not detail.endswith((".", "?", "!")):
                 detail += "."
             return f"database error: {detail} {unchanged[0].upper()}{unchanged[1:]}."
+
+
+def _differences(recorded: TreeKey, found: TreeKey) -> str:
+    """Return how FOUND differs from RECORDED, e.g. "fs name differs
+    (recorded none, found cephfs)"; several differences are joined by ", "."""
+
+    def fs_name(name: str | None) -> str:
+        return "none" if name is None else name
+
+    fields = (
+        ("cluster", recorded.cluster_fsid, found.cluster_fsid),
+        ("fs name", fs_name(recorded.fs_name), fs_name(found.fs_name)),
+        ("fs path", display_path(recorded.fs_path), display_path(found.fs_path)),
+        ("depth", recorded.max_depth, found.max_depth),
+    )
+    return ", ".join(
+        f"{label} differs (recorded {was}, found {now})"
+        for label, was, now in fields
+        if was != now
+    )
 
 
 def describe_tree(key: TreeKey) -> str:

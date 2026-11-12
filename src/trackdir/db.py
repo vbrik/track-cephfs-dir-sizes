@@ -9,6 +9,7 @@ Writes run in one transaction each, so a failure or interrupt stores nothing.
 
 import heapq
 import os
+import re
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -51,6 +52,8 @@ CREATE TABLE trackdir.meta (
 
 CREATE TABLE trackdir.tree (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name         text  NOT NULL UNIQUE  -- the user's; the next four are what it stands for
+                 CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
     cluster_fsid text  NOT NULL,
     fs_name      text,            -- NULL: the cluster's default filesystem
     fs_path      bytea NOT NULL,  -- ROOT inside the filesystem; b'/' is its root
@@ -82,6 +85,8 @@ CREATE TABLE trackdir.sample (
     baseline_seconds double precision NOT NULL,       -- loading the baseline
     store_seconds    double precision NOT NULL DEFAULT 0  -- the store, up to its commit
 );
+-- Finds a tree's latest sample, which every baseline load and store asks for.
+CREATE INDEX sample_tree_started ON trackdir.sample (tree_id, started, id);
 
 CREATE TABLE trackdir.path (
     id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -145,6 +150,13 @@ CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
 # The staging table's columns in COPY order; dir_state_row() gives all but
 # deleted.
 STAGE_COLUMNS = ("path", *ROW_COLUMNS, "deleted")
+
+# A tree's name: 1 to 64 of these characters, the first a letter or digit. The
+# DDL's CHECK on tree.name says the same.
+TREE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+TREE_NAME_RULE = (
+    "1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-', the first a letter or digit"
+)
 
 # Matches a tree by key, in _key_params() order. fs_name is NULL for the default
 # filesystem, which "=" would never match.
@@ -213,6 +225,30 @@ class TreeKey:
     ) -> Self:
         """Return the key for a tree given as header strings; fs_path is fsencoded."""
         return cls(cluster_fsid, fs_name, os.fsencode(fs_path), max_depth)
+
+
+class TreeMismatch(DbError):
+    """Tree NAME stands for another mount identity than the one found.
+
+    recorded is what the database holds for the name, found what is being
+    sampled.
+    """
+
+    def __init__(self, name: str, recorded: TreeKey, found: TreeKey) -> None:
+        super().__init__(f"tree {name} is recorded as {recorded}, not {found}")
+        self.name = name
+        self.recorded = recorded
+        self.found = found
+
+
+class TreeNamedOtherwise(DbError):
+    """The mount identity KEY is recorded as tree OTHER, not as NAME."""
+
+    def __init__(self, name: str, other: str, key: TreeKey) -> None:
+        super().__init__(f"{key} is tree {other}, not {name}")
+        self.name = name
+        self.other = other
+        self.key = key
 
 
 class SampleConflict(DbError):
@@ -339,6 +375,11 @@ class DbStats:
     tree_stats: tuple[TreeStats, ...]  # by id
 
 
+def valid_tree_name(name: str) -> bool:
+    """Return whether NAME can name a tree (TREE_NAME_RULE)."""
+    return TREE_NAME.fullmatch(name) is not None
+
+
 def tree_key_of(header: CaptureHeader) -> TreeKey:
     """Return the key of the tree HEADER describes."""
     return TreeKey.of(
@@ -438,9 +479,17 @@ def check_schema(conn: "psycopg.Connection") -> None:
 
 
 def load_baseline(
-    conn: "psycopg.Connection", key: TreeKey, *, max_dirs: int | None = None
+    conn: "psycopg.Connection",
+    name: str,
+    key: TreeKey,
+    *,
+    max_dirs: int | None = None,
 ) -> Baseline:
-    """Return the baseline of tree KEY: its current state as of its latest sample.
+    """Return the baseline of tree NAME: its current state as of its latest sample.
+
+    KEY is the mount identity of what is about to be sampled; raises
+    TreeMismatch or TreeNamedOtherwise if NAME and KEY do not belong together
+    (see _resolve_tree).
 
     It reads the tree's current_dir_state rows, so it costs in proportion to
     the tree's live directories, whatever history is stored. An unknown tree,
@@ -453,11 +502,10 @@ def load_baseline(
     """
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        tree = cur.execute(
-            f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH}", _key_params(key)
-        ).fetchone()
-        if tree is None:
+        tree_id = _resolve_tree(cur, name, key, lock=False, create=False)
+        if tree_id is None:
             return Baseline.empty()
+        tree = (tree_id,)
         latest = cur.execute(_LATEST_SAMPLE, tree).fetchone()
         if latest is None:
             return Baseline.empty()
@@ -478,24 +526,28 @@ def load_baseline(
     return Baseline.build(sample_id, started, rows)
 
 
-def latest_started(conn: "psycopg.Connection", key: TreeKey) -> datetime | None:
-    """Return when tree KEY's latest sample started; None without samples.
+def latest_started(
+    conn: "psycopg.Connection", name: str, key: TreeKey
+) -> datetime | None:
+    """Return when tree NAME's latest sample started; None without samples.
+
+    KEY is the mount identity of what would be sampled; raises TreeMismatch or
+    TreeNamedOtherwise as load_baseline does.
 
     The latest sample is the one with the greatest (started, id), as in the
     baseline. Unlike load_baseline, this reads no directory rows.
     """
-    with _db_errors(), conn.cursor() as cur:
-        tree = cur.execute(
-            f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH}", _key_params(key)
-        ).fetchone()
-        if tree is None:
+    with _db_errors(), conn.transaction(), conn.cursor() as cur:
+        tree_id = _resolve_tree(cur, name, key, lock=False, create=False)
+        if tree_id is None:
             return None
-        latest = cur.execute(_LATEST_SAMPLE, tree).fetchone()
+        latest = cur.execute(_LATEST_SAMPLE, (tree_id,)).fetchone()
     return None if latest is None else latest[1]
 
 
 def store_sample(
     conn: "psycopg.Connection",
+    name: str,
     header: CaptureHeader,
     key: TreeKey,
     baseline: Baseline,
@@ -503,7 +555,11 @@ def store_sample(
     replayed_from: str | None,
     baseline_seconds: float,
 ) -> int:
-    """Store a sample of tree KEY, in one transaction; return its id.
+    """Store a sample of tree NAME, in one transaction; return its id.
+
+    KEY is the tree's mount identity. A NAME and KEY that are both new create
+    the tree; raises TreeMismatch or TreeNamedOtherwise if they do not belong
+    together (see _resolve_tree), and nothing is stored.
 
     The sample row comes from HEADER (dirs and errors count the probed
     directories; its max_depth is the tree's, so not stored again); its
@@ -532,7 +588,7 @@ def store_sample(
     clock = time.monotonic()
     with _db_errors(), conn.transaction(), conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        tree_id = _lock_tree(cur, key)
+        tree_id = _resolve_tree(cur, name, key, lock=True, create=True)
         latest = cur.execute(_LATEST_SAMPLE, (tree_id,)).fetchone()
         if (latest[0] if latest else None) != baseline.sample_id:
             raise ConcurrentSample(key)
@@ -908,24 +964,49 @@ def _tree_stats(
     )
 
 
-def _lock_tree(cur: "psycopg.Cursor", key: TreeKey) -> int:
-    """Return the id of tree KEY with its row locked, creating the tree if new.
+def _resolve_tree(
+    cur: "psycopg.Cursor", name: str, key: TreeKey, *, lock: bool, create: bool
+) -> int | None:
+    """Return the id of tree NAME, checked against the mount identity KEY.
 
-    Selects first so that only a tree's first sample inserts. If a concurrent
-    first sample inserts the row in between, ON CONFLICT waits for it to
-    commit and inserts nothing, and the second select finds the row.
+    The rules, the only place a tree is told from another:
+    - NAME is recorded with KEY: its id, the row locked if LOCK.
+    - NAME is recorded with another identity: TreeMismatch.
+    - NAME is unknown and KEY is recorded under another name:
+      TreeNamedOtherwise.
+    - neither is recorded: the tree is created if CREATE, else None.
+
+    Selects first so that only a tree's first sample inserts. A concurrent
+    first sample that inserts the same name or the same identity makes ON
+    CONFLICT wait for it and insert nothing; the second pass then judges that
+    row by the rules above, so a race ends in the same refusals, never in a
+    unique violation. That needs READ COMMITTED, as the store sets.
     """
-    params = _key_params(key)
-    select = f"SELECT id FROM trackdir.tree WHERE {_TREE_MATCH} FOR UPDATE"
-    row = cur.execute(select, params).fetchone()
-    if row is None:
+    by_name = (
+        "SELECT id, cluster_fsid, fs_name, fs_path, max_depth FROM trackdir.tree"
+        " WHERE name = %s" + (" FOR UPDATE" if lock else "")
+    )
+    for _ in range(2):
+        row = cur.execute(by_name, (name,)).fetchone()
+        if row is not None:
+            recorded = TreeKey(row[1], row[2], bytes(row[3]), row[4])
+            if recorded != key:
+                raise TreeMismatch(name, recorded, key)
+            return row[0]
+        other = cur.execute(
+            f"SELECT name FROM trackdir.tree WHERE {_TREE_MATCH}", _key_params(key)
+        ).fetchone()
+        if other is not None:
+            raise TreeNamedOtherwise(name, other[0], key)
+        if not create:
+            return None
         cur.execute(
-            "INSERT INTO trackdir.tree (cluster_fsid, fs_name, fs_path, max_depth)"
-            " VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            params,
+            "INSERT INTO trackdir.tree"
+            " (name, cluster_fsid, fs_name, fs_path, max_depth)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (name, *_key_params(key)),
         )
-        row = cur.execute(select, params).fetchone()
-    return row[0]
+    raise DbError(f"tree {name} could not be created: its row changed meanwhile")
 
 
 def _key_params(key: TreeKey) -> tuple[str, str | None, bytes, int]:

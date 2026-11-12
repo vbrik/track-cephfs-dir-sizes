@@ -75,7 +75,10 @@ class FakeSampler:
 
 
 def write_config(tmp_path: Path, roots=ROOTS, extra: str = "") -> Path:
-    trees = "".join(f'[[tree]]\nroot = "{root}"\nmax_depth = 1\n\n' for root in roots)
+    trees = "".join(
+        f'[[tree]]\nname = "t{n}"\nroot = "{root}"\nmax_depth = 1\n\n'
+        for n, root in enumerate(roots, 1)
+    )
     path = tmp_path / "trackdir.toml"
     path.write_text(f'interval = "1h"\ndb = "postgresql://x/y_test"\n{extra}\n{trees}')
     return path
@@ -101,7 +104,9 @@ def config_of(interval: Interval, roots=ROOTS) -> DaemonConfig:
         interval=interval,
         dsn="postgresql://x/y_test",
         log_level=logging.INFO,
-        trees=tuple(TreeConfig(Path(root), 1) for root in roots),
+        trees=tuple(
+            TreeConfig(f"t{n}", Path(root), 1) for n, root in enumerate(roots, 1)
+        ),
     )
 
 
@@ -309,7 +314,7 @@ def test_overrun_is_logged_once_and_exits_1(tmp_path):
     config = tmp_path / "trackdir.toml"
     config.write_text(
         'interval = "1s"\ndb = "postgresql://x/y_test"\n'
-        f'[[tree]]\nroot = "{ROOTS[0]}"\nmax_depth = 1\n'
+        f'[[tree]]\nname = "t1"\nroot = "{ROOTS[0]}"\nmax_depth = 1\n'
     )
     out = io.StringIO()
     status = run(config, stream=out, inspect=lambda c, w: (None,), sample=stuck)
@@ -455,7 +460,7 @@ def no_database(monkeypatch):
         daemon, "database", lambda dsn, unchanged: contextlib.nullcontext(object())
     )
     monkeypatch.setattr(daemon, "check_schema", lambda conn: None)
-    monkeypatch.setattr(daemon, "latest_started", lambda conn, key: None)
+    monkeypatch.setattr(daemon, "latest_started", lambda conn, name, key: None)
 
 
 def test_startup_rejects_duplicate_trees(tmp_path, fake_ceph, no_database, monkeypatch):
@@ -470,10 +475,10 @@ def test_startup_rejects_duplicate_trees(tmp_path, fake_ceph, no_database, monke
         config = DaemonConfig(Path("t.toml"), Interval(HOUR, "1h"), "x", 0, trees)
         return inspect_trees(config, OnceWarner(log))
 
-    assert inspect(TreeConfig(a, 1), TreeConfig(b, 1)) == (None, None)
-    assert inspect(TreeConfig(a, 1), TreeConfig(a, 2)) == (None, None)
+    assert inspect(TreeConfig("a", a, 1), TreeConfig("b", b, 1)) == (None, None)
+    assert inspect(TreeConfig("a", a, 1), TreeConfig("a2", a, 2)) == (None, None)
     with pytest.raises(FatalError) as raised:
-        inspect(TreeConfig(a, 1), TreeConfig(a / ".", 1))
+        inspect(TreeConfig("a", a, 1), TreeConfig("b", a / ".", 1))
     message = str(raised.value)
     assert "trees 1 and 2 in t.toml" in message
     assert "remove one" in message
