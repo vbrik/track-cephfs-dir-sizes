@@ -79,12 +79,16 @@ Run as root for a complete sample. As another user the sample is partial:
 directories you cannot read are stored as EACCES errors, without rstats, and
 later samples retry them.
 
-A tree is a directory of a CephFS filesystem, identified by the cluster fsid,
-the filesystem and the directory's path inside it, so it is the same tree
-whichever host or mount point samples it. --max-depth is part of a tree's
-identity too: a run with another depth is a different tree, and its first
-sample stores every directory again. --max-dirs is not: a run over it stores
-nothing, and a higher limit continues the same tree.
+A tree is a directory of a CephFS filesystem sampled to one depth, under the
+name given with --tree. A new NAME starts a tree and records what it stands
+for: the cluster fsid, the filesystem name as the mount gives it, the
+directory's path inside the filesystem, and --max-depth. A known NAME is
+sampled only if ROOT is still all of that, whichever host or mount point it is
+on; otherwise nothing is stored and the message says what differs, so a wrong
+ROOT or a changed mount cannot start a new history unnoticed. Another depth
+needs another name, and its first sample stores every directory again.
+--max-dirs is not part of a tree: a run over it stores nothing, and a higher
+limit continues the same tree.
 
 DSN is a libpq connection string or URI, e.g.
 postgresql://trackdir@db.example.org/trackdir. Put the password in ~/.pgpass
@@ -578,7 +582,7 @@ def _parser() -> argparse.ArgumentParser:
         epilog=DB_SUMMARY_EPILOG,
     )
     summarize.add_argument(
-        "--tree", type=_int_between(1), metavar="ID", help="report tree ID only"
+        "--tree", type=_tree_name, metavar="NAME", help="report the tree NAME only"
     )
     summarize.add_argument(
         "--samples",

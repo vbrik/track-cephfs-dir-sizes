@@ -1,7 +1,9 @@
 # Schema version 5 and long-run robustness — design
 
-Date: 2026-11-11. Status: draft; the decisions in section 2 were agreed in
-discussion on 2026-11-11, the document itself awaits approval.
+Date: 2026-11-11. Status: the decisions in section 2 were agreed in
+discussion on 2026-11-11. Implemented: sections 4, 5 and 8 (2026-11-12, plan
+`2026-11-11-schema-v5`) and section 7 (2026-11-12, plan
+`2026-11-12-tree-names`). Not implemented: section 6, the overrun rule.
 
 ## 1. Goal and scope
 
@@ -366,6 +368,11 @@ UPDATE trackdir.tree SET fs_name = 'cephfs' WHERE name = 'projects';
 ```
 
 `max_depth` is part of what is checked: another depth needs another name.
+
+As implemented: names are case-sensitive; the DDL checks the name's form
+too; `SCHEMA_VERSION` stayed 5, since nothing was in production; and `sample`
+got an index on `(tree_id, started, id)` for finding a tree's latest sample.
+The refusals are `db.TreeMismatch` and `db.TreeNamedOtherwise`.
 
 ### Migration rule
 

@@ -275,7 +275,8 @@ def test_tree_filter_and_recent_limit(db, dsn, subtree, initial, tmp_path):
         t.id for t in everything.tree_stats
     )
     assert everything.trees == 2
-    one = summarize(db, tree_id=everything.tree_stats[1].id, recent=0)
+    assert [t.name for t in everything.tree_stats] == [initial.name, other.name]
+    one = summarize(db, tree=other.name, recent=0)
     assert (one.trees, one.samples, one.dir_states) == (
         everything.trees,
         everything.samples,
@@ -287,7 +288,9 @@ def test_tree_filter_and_recent_limit(db, dsn, subtree, initial, tmp_path):
     first = summarize(db, recent=1).tree_stats[0]
     assert first.samples == 2
     assert [s.kind for s in first.recent] == ["incremental"]
-    assert summarize(db, tree_id=10**9).tree_stats == ()
+    unknown = summarize(db, tree="nosuch")
+    assert unknown.tree_stats == ()
+    assert (unknown.trees, unknown.samples) == (everything.trees, everything.samples)
 
 
 def test_growth_needs_two_samples(db, initial):
@@ -515,6 +518,7 @@ def stats_of(**changes) -> DbStats:
     )
     tree = TreeStats(
         id=3,
+        name="projects",
         key=KEY,
         samples=2,
         first_started=T1 - timedelta(days=1),
@@ -561,8 +565,8 @@ def test_render_text():
         "Database: schema version 5; 1 tree, 2 samples, 144434 dir_state rows;"
         " 37.7 MiB on disk\n"
         "\n"
-        "Tree 3 (cluster 11111111-2222-4333-8444-555555555555, default filesystem,"
-        " path /proj/sub, depth 4)\n"
+        "Tree projects (cluster 11111111-2222-4333-8444-555555555555,"
+        " default filesystem, path /proj/sub, depth 4)\n"
         "  samples: 2, 2026-10-15T20:48:11Z to 2026-10-16T20:48:11Z\n"
         "  current: 72017 directories; 41 had errors: open EACCES 41\n"
         "  ROOT:    3.5 TiB, 4567890 files, 72017 directories, last changed in"
@@ -650,6 +654,7 @@ def test_render_json():
         "bytes_on_disk": 39542784,
     }
     (tree,) = data["trees"]
+    assert (tree["id"], tree["name"]) == (3, "projects")
     assert tree["key"]["fs_path"] == "/proj/sub"
     assert tree["key"]["fs_name"] is None
     assert tree["current_errors"] == [{"stage": "open", "code": "EACCES", "dirs": 41}]
@@ -682,14 +687,14 @@ def test_cli_prints_the_report_on_stdout(initial, dsn, capsys):
     stdout, stderr = capsys.readouterr()
     assert stderr == ""
     assert stdout.startswith("Database: schema version 5; 1 tree, 1 sample,")
-    assert f"\nTree 1 ({tree_identity(initial.tree)})\n" in stdout
+    assert f"\nTree {initial.name} ({tree_identity(initial.tree)})\n" in stdout
 
 
 def test_cli_json_honors_tree_and_samples(initial, dsn, capsys):
-    replay(dsn, SUBTREE, max_depth=1)
-    assert main(["db", "summary", "--db", dsn, "--json", "--tree", "2"]) == 0
+    other = replay(dsn, SUBTREE, max_depth=1)
+    assert main(["db", "summary", "--db", dsn, "--json", "--tree", other.name]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert [t["id"] for t in data["trees"]] == [2]
+    assert [(t["id"], t["name"]) for t in data["trees"]] == [(2, other.name)]
     assert main(["db", "summary", "--db", dsn, "--samples", "0"]) == 0
     stdout = capsys.readouterr().out
     assert stdout.count("\nTree ") == 2
@@ -698,10 +703,23 @@ def test_cli_json_honors_tree_and_samples(initial, dsn, capsys):
 
 
 def test_cli_unknown_tree_fails(initial, dsn, capsys):
-    assert main(["db", "summary", "--db", dsn, "--tree", "9"]) == 1
+    assert main(["db", "summary", "--db", dsn, "--tree", "nosuch"]) == 1
     stdout, stderr = capsys.readouterr()
     assert stdout == ""
-    assert collapse(stderr).startswith("ERROR: the database has no tree 9.")
+    assert collapse(stderr).startswith("ERROR: the database has no tree nosuch.")
+
+
+def test_a_numeric_filter_is_a_name_not_an_id(db, dsn):
+    sample.run_db_init(dsn)
+    replay(dsn, SUBTREE, max_depth=1, tree="3")
+    (tree,) = summarize(db, tree="3").tree_stats
+    assert (tree.id, tree.name) == (1, "3")
+    assert summarize(db, tree="1").tree_stats == ()
+
+
+def test_summary_names_each_tree(db, initial):
+    (tree,) = summarize(db).tree_stats
+    assert tree.name == initial.name
 
 
 def test_cli_without_schema_says_to_init(dsn, capsys):
@@ -728,7 +746,7 @@ def test_cli_top_selects_growth(initial, dsn, subtree, tmp_path, capsys):
 
 @pytest.mark.parametrize(
     "args",
-    [["--samples", "-1"], ["--tree", "0"], ["--top", "-1"], ["--depth", "1"]],
+    [["--samples", "-1"], ["--tree", "a b"], ["--top", "-1"], ["--depth", "1"]],
 )
 def test_cli_usage_errors(args, capsys):
     with pytest.raises(SystemExit) as exc:

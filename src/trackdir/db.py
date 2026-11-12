@@ -351,7 +351,8 @@ class TreeStats:
     """One tree: its samples and its current state."""
 
     id: int
-    key: TreeKey
+    name: str
+    key: TreeKey  # the mount identity the name stands for
     samples: int
     first_started: datetime | None  # None: the tree has no samples
     last_started: datetime | None
@@ -695,13 +696,14 @@ WHERE s.deleted AND p.tree_id = %(tree)s AND p.path = s.path
 
 def summarize(
     conn: "psycopg.Connection",
-    tree_id: int | None = None,
+    tree: str | None = None,
     recent: int = 10,
     top: int = 3,
 ) -> DbStats:
-    """Return the database's statistics, with those of tree TREE_ID or all trees.
+    """Return the database's statistics, with those of the tree named TREE or
+    of all trees.
 
-    An unknown TREE_ID gives no tree statistics. Each tree lists its RECENT
+    An unknown TREE gives no tree statistics. Each tree lists its RECENT
     newest samples, and the TOP directories with the most own growth since its
     first sample, given 2 samples, and since its second-to-last, given 3; TOP 0
     skips growth. Without growth nothing depends on how much history is
@@ -715,6 +717,14 @@ def summarize(
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         _check_version(conn)
         counts = cur.execute(_COUNTS).fetchone()
+        tree_id = None
+        if tree is not None:
+            found = cur.execute(
+                "SELECT id FROM trackdir.tree WHERE name = %s", (tree,)
+            ).fetchone()
+            if found is None:
+                return DbStats(SCHEMA_VERSION, *counts, ())
+            (tree_id,) = found
         params = {"tree": tree_id}
         trees = cur.execute(_TREES, params).fetchall()
         samples = _group(cur.execute(_SAMPLES, params))
@@ -734,6 +744,7 @@ def summarize(
     tree_stats = tuple(
         _tree_stats(
             tree_id,
+            name,
             TreeKey(*key),
             samples.get(tree_id, []),
             roots_now.get(tree_id),
@@ -742,7 +753,7 @@ def summarize(
             recent,
             growth[tree_id],
         )
-        for tree_id, *key in trees
+        for tree_id, name, *key in trees
     )
     return DbStats(SCHEMA_VERSION, *counts, tree_stats)
 
@@ -757,7 +768,7 @@ _COUNTS = """SELECT (SELECT count(*) FROM trackdir.tree),
 """
 _IN_TREE = "(%(tree)s::bigint IS NULL OR {column} = %(tree)s::bigint)"
 _TREES = (
-    "SELECT id, cluster_fsid, fs_name, fs_path, max_depth"
+    "SELECT id, name, cluster_fsid, fs_name, fs_path, max_depth"
     f" FROM trackdir.tree WHERE {_IN_TREE.format(column='id')} ORDER BY id"
 )
 # Each tree's samples, oldest first, with what they stored. Columns after
@@ -928,6 +939,7 @@ def _group(rows: Iterator[tuple]) -> dict[int, list[tuple]]:
 
 def _tree_stats(
     tree_id: int,
+    name: str,
     key: TreeKey,
     samples: list[tuple],
     root_now: tuple | None,
@@ -951,6 +963,7 @@ def _tree_stats(
         stats.append(stat)
     return TreeStats(
         id=tree_id,
+        name=name,
         key=key,
         samples=len(stats),
         first_started=stats[0].started if stats else None,

@@ -60,6 +60,10 @@
   are allowed only where they remove a read of history, and only
   `db.store_sample` writes them, in the transaction that stores the rows;
   a test rebuilds each from `dir_state` (`conftest.assert_invariants`).
+- A tree is told from another in one place, `db._resolve_tree`, which checks
+  a tree name against a mount identity (`db.TreeKey`). No other code compares
+  names in place of mount identities or looks a tree up by one of them alone
+  in order to store into it.
 - A tree's latest sample is the one with the greatest `(started, id)`, in the
   baseline, the current state, the order guard, the stale-baseline check and
   the summary alike.

@@ -42,16 +42,16 @@ _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
 )
 
 
-def run_summary(dsn: str, tree_id: int | None, recent: int, top: int) -> DbStats:
+def run_summary(dsn: str, tree: str | None, recent: int, top: int) -> DbStats:
     """Return the statistics of DSN's database; see db.summarize.
 
-    Raises FatalError, also if tree TREE_ID does not exist.
+    Raises FatalError, also if no tree is named TREE.
     """
     with database(dsn, DB_UNCHANGED) as conn:
-        stats = summarize(conn, tree_id, recent, top)
-    if tree_id is not None and not stats.tree_stats:
+        stats = summarize(conn, tree, recent, top)
+    if tree is not None and not stats.tree_stats:
         raise FatalError(
-            f"the database has no tree {tree_id}. Run trackdir db summary without "
+            f"the database has no tree {tree}. Run trackdir db summary without "
             "--tree to list the trees."
         )
     return stats
@@ -96,7 +96,7 @@ def format_bytes(size: int) -> str:
 
 
 def _tree_lines(tree: TreeStats) -> list[str]:
-    lines = [f"Tree {tree.id} ({tree_identity(tree.key)})"]
+    lines = [f"Tree {tree.name} ({tree_identity(tree.key)})"]
     samples = f"  samples: {tree.samples}"
     if tree.first_started is not None and tree.last_started is not None:
         samples += f", {_moment(tree.first_started)} to {_moment(tree.last_started)}"

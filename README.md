@@ -36,7 +36,7 @@ To update, `git pull`; no reinstall is needed.
 
     export TRACKDIR_DB=postgresql://trackdir@db.example.org/trackdir
     trackdir db init                                     # once per database
-    trackdir sample /mnt/cephfs/projects --max-depth 3   # run it again and again
+    trackdir sample /mnt/cephfs/projects --tree projects --max-depth 3
 
 Put the database password in `~/.pgpass` or `PGPASSWORD`, never in `--db`:
 `ps` shows command lines to every local user.
@@ -47,13 +47,34 @@ needs `TEMPORARY` on the database, which roles have by default. For
 read-only users and for removing a tree, see
 [docs/schema.md](docs/schema.md#access).
 
-A tree is identified by cluster fsid, filesystem name, path inside the
-filesystem and `--max-depth`, whichever host or mount point samples it. A run
-with another depth is a different tree and starts a new history. So is a run
-through a mount that names the filesystem (source `USER@FSID.NAME=/PATH`, or
-option `fs=` or `mds_namespace=`) when earlier runs used one that does not
-(the cluster's default filesystem), even if it is the same filesystem: mount
-it the same way on every host.
+Run the same command again and again: every run adds a sample to the tree
+`projects`.
+
+### Tree names
+
+You name each tree with `--tree` (1 to 64 characters of `A-Z a-z 0-9 . _ -`,
+case matters). The first sample under a name records what the name stands
+for: the cluster fsid, the filesystem name as the mount gives it, the path
+inside the filesystem and `--max-depth`. Later samples under that name are
+stored only if ROOT is still all of that, on whichever host or mount point:
+
+| The name is | What ROOT is | Result |
+|---|---|---|
+| new | not yet a tree | a new tree with this name |
+| new | already a tree under another name | refused: use that name |
+| known | what the name stands for | the sample is stored |
+| known | something else | refused; the message says what differs |
+
+So a wrong ROOT, another filesystem at the same mount point or a changed
+mount can neither start a new history unnoticed nor damage an existing one.
+Another depth is another tree and needs another name.
+
+One refusal needs care. A mount that names the filesystem (source
+`USER@FSID.NAME=/PATH`, or option `fs=` or `mds_namespace=`) and one that does
+not (the cluster's default filesystem) differ in the filesystem name, even
+for the same filesystem. Mount it the same way on every host. If a host must
+mount it differently, for example after the daemon moved, see
+[Changed mount](docs/schema.md#changed-mount) to keep the tree's history.
 
 A tree's first sample stores every directory. Later samples list a directory's
 children only if the directory changed since the last sample, and store only
@@ -86,12 +107,20 @@ lists every key:
     db = "postgresql://trackdir@db.example.org/trackdir"   # default: $TRACKDIR_DB
 
     [[tree]]
+    name = "projects"
     root = "/mnt/cephfs/projects"
     max_depth = 3
 
     [[tree]]
+    name = "home"
     root = "/mnt/cephfs/home"
     max_depth = 2
+
+A tree's `name` is what `trackdir sample --tree` takes, with the same rules
+([Tree names](#tree-names)). The daemon checks every name against what is
+mounted at its `root` when it starts and at every sample, and stops on a
+mismatch. Changing a `root` or moving the daemon to another host needs
+nothing else, as long as the mount gives the same filesystem name and path.
 
 Every interval the daemon samples each tree in turn, and logs one line per
 event to stdout. After a restart it waits for the next due cycle, judged by
@@ -123,12 +152,12 @@ sample between cycles.
 ## Summarize the database
 
     trackdir db summary                  # every tree, its 10 newest samples
-    trackdir db summary --tree 3 --top 10
-    trackdir db summary --json | jq '.trees[] | {id, current_dirs}'
+    trackdir db summary --tree projects --top 10
+    trackdir db summary --json | jq '.trees[] | {name, current_dirs}'
 
 Example (placeholders):
 
-    Tree 1 (cluster 1111…, default filesystem, path /proj/sub, depth 4)
+    Tree projects (cluster 1111…, default filesystem, path /proj/sub, depth 4)
       samples: 2, 2026-10-16T20:48:11Z to 2026-10-16T20:48:30Z
       current: 72017 directories; 41 had errors: open EACCES 41
       ROOT:    1.2 PiB, 412345678 files, 5123456 directories, last changed in sample 2
@@ -151,7 +180,7 @@ thinly over many directories does not stand out.
 ## Capture directory state
 
     trackdir capture /mnt/cephfs/projects --max-depth 3 -o projects.jsonl.gz
-    trackdir sample --replay projects.jsonl.gz           # store a capture
+    trackdir sample --replay projects.jsonl.gz --tree projects   # store a capture
 
 A capture is a gzipped JSON Lines file: a header line identifying the tree,
 then one line per directory (inspect with `zcat FILE | jq`):
