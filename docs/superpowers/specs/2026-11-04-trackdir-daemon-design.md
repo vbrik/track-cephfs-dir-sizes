@@ -3,6 +3,16 @@
 Date: 2026-11-04. Status: draft; the decisions in section 2 were agreed in
 brainstorming on 2026-11-04, the document itself awaits approval.
 
+Amended 2026-11-12: an overrun no longer aborts a sample or stops the daemon.
+It is logged as an error when the interval passes, the cycle finishes, and
+the next cycle starts as soon as it does; `interrupts.deadline` and `Overrun`
+became `interrupts.call_after`. See section 6 of the
+[schema-v5 spec](2026-11-11-schema-v5-design.md) for the reasons. Where this
+spec says an overrun exits with status 1 or aborts the sample in progress
+(the "Overrun" row of section 2, sections 6 and 7, the overrun tests of
+section 10), that is superseded. Each tree also has a `name` now (section 7
+of the same spec).
+
 ## 1. Goal and scope
 
 `trackdir daemon --config FILE` runs continuously and samples the trees listed

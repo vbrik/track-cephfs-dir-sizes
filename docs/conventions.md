@@ -33,7 +33,10 @@
 - Signals become exceptions derived from BaseException (`interrupts.py`), so
   a run unwinds and cleans up: `walker.walk` cancels pending probes, a
   transaction rolls back. Code that catches them re-raises them or decides
-  the exit status (`cli.main`, `daemon.run`).
+  the exit status (`cli.main`, `daemon.run`). The daemon's overrun timer is
+  not one of them: `interrupts.call_after` calls a function when the time
+  passes and interrupts nothing, so an overrun is logged and the cycle
+  finishes.
 - `walk_within` alone enforces the depth limit: no directory at max depth is
   listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);

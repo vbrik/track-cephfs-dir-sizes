@@ -708,3 +708,15 @@ def test_help_lists_the_tree_name_key(capsys):
     text = capsys.readouterr().out
     assert 'name = "projects"' in text
     assert "checked against" in text
+
+
+def test_daemon_help_describes_an_overrun_as_logged_not_fatal(capsys):
+    with pytest.raises(SystemExit):
+        main(["daemon", "--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert "overrun" in text
+    assert "the cycle finishes" in text
+    assert "keeps running" in text
+    for old in ("aborted", "exits once", "(including an overrun)"):
+        assert old not in text
+    assert "1 error, 2 usage error" in text

@@ -123,9 +123,10 @@ max_depth are required; the other keys are shown with their defaults:
 Cycles start one interval apart. The first starts one interval after the
 oldest of the trees' latest samples, or at once if a tree has none, so a
 restart adds no sample. A cycle still running when the next is due is an
-overrun: it is logged at once, the sample in progress is aborted and stores
-nothing (samples the cycle already stored stay), and the daemon exits once the
-probes in flight return, which a stuck MDS can delay.
+overrun: it is logged at once as an error, but the cycle finishes and the
+daemon keeps running. The next cycle starts as soon as it does, and cycles
+that were due meanwhile are skipped, so nothing is lost but resolution. A
+probe stuck on an unresponsive MDS holds its cycle until the MDS answers.
 
 A tree's name is checked against what is mounted at its root, at startup and
 at every sample. A new name starts a tree. A name that the database holds for
@@ -133,14 +134,15 @@ another directory, depth or filesystem name is an error, so a changed mount
 cannot start a new history unnoticed; the message says what differs.
 
 Per-directory errors are stored and counted, as by trackdir sample. Any other
-error is logged and stops the daemon, so run it under a service manager that
-does not restart it: the stopped service is the alarm. A trackdir sample of
+error, an overrun excepted, is logged and stops the daemon, so run it under a
+service manager that does not restart it: the stopped service is the alarm.
+Overruns show only in the log, and as gaps between the sample times that
+trackdir db summary lists. A trackdir sample of
 one of the trees while the daemon samples it can be such an error: whichever
 of the two stores second fails.
 
-Exit status: 0 stopped by SIGTERM, SIGHUP or SIGINT, 1 error (including an
-overrun), 2 usage error. A stop aborts the sample in progress, which stores
-nothing."""
+Exit status: 0 stopped by SIGTERM, SIGHUP or SIGINT, 1 error, 2 usage error.
+A stop aborts the sample in progress, which stores nothing."""
 
 DB_INIT_DESCRIPTION = f"""\
 Create trackdir's tables in the database given by --db or {dbcli.DSN_ENV}.

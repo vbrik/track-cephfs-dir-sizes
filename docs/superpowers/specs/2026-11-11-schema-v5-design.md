@@ -3,7 +3,8 @@
 Date: 2026-11-11. Status: the decisions in section 2 were agreed in
 discussion on 2026-11-11. Implemented: sections 4, 5 and 8 (2026-11-12, plan
 `2026-11-11-schema-v5`) and section 7 (2026-11-12, plan
-`2026-11-12-tree-names`). Not implemented: section 6, the overrun rule.
+`2026-11-12-tree-names`) and section 6 (2026-11-12, plan
+`2026-11-12-overrun-rule`).
 
 ## 1. Goal and scope
 
@@ -292,6 +293,10 @@ The new rule:
   are not queued. Under lasting overload the cycles run back to back, so the
   effective interval is the cycle's duration.
 - The log line of a finished cycle says by how much it overran.
+
+As implemented: the timer is `interrupts.call_after`, which calls the logging
+function and interrupts nothing; whether a cycle overran is read from the
+clock when it finishes.
 
 Status 1 remains for a `FatalError` and a bug. A probe stuck on an
 unresponsive MDS blocks the daemon as it does today.

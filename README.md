@@ -126,12 +126,9 @@ Every interval the daemon samples each tree in turn, and logs one line per
 event to stdout. After a restart it waits for the next due cycle, judged by
 the samples in the database.
 
-Per-directory errors are stored as usual. Any other error, including a cycle
-that runs past the next one's start, is logged and **stops the daemon** with
-status 1, so the stopped service is the alarm. An overrun is logged when it
-happens, but the exit waits for the probes in flight: a probe stuck on an
-unresponsive MDS holds it until the MDS answers. Run it without automatic
-restarts, e.g. with systemd:
+Per-directory errors are stored as usual. Any other error is logged and
+**stops the daemon** with status 1, so the stopped service is the alarm. Run
+it without automatic restarts, e.g. with systemd:
 
     [Service]
     Type=simple
@@ -145,6 +142,16 @@ and watch for failed units (`systemctl --failed`, or `OnFailure=` to send
 mail). A manual `trackdir sample` of one of the daemon's trees while the
 daemon samples it can stop the daemon (whichever stores second fails); one
 between cycles is harmless.
+
+One thing is not such an error: an **overrun**, a cycle still running when
+the next is due. It is logged as an error the moment the interval passes, but
+the cycle finishes and the daemon keeps running; the next cycle starts as
+soon as it does, and the cycles that were due meanwhile are skipped. A sample
+records what changed since the tree's last one, so a late cycle loses
+resolution and nothing else. Overruns show only in the log and as gaps between
+sample times in `trackdir db summary`; raise `interval` or sample fewer or
+smaller trees if they repeat. A probe stuck on an unresponsive MDS holds its
+cycle, and so the daemon, until the MDS answers.
 
 The daemon samples one tree at a time, but may keep the memory of its largest
 sample between cycles.
