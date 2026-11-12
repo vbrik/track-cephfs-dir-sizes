@@ -1,10 +1,16 @@
 """trackdir daemon: sample the trees of a config file once per interval.
 
 Logs are not expected to be watched, so the exit status is the alarm: any
-error that is not routine (a FatalError, an overrun, a bug) is logged and
-ends the daemon with status 1, leaving a failed unit for the service manager
-to show. Routine errors are per-directory errors, which every sample stores
-and counts. A stop by signal exits 0, so systemd counts it as clean.
+error that is not routine (a FatalError, a bug) is logged and ends the daemon
+with status 1, leaving a failed unit for the service manager to show. Routine
+errors are per-directory errors, which every sample stores and counts. A stop
+by signal exits 0, so systemd counts it as clean.
+
+An overrun, a cycle still running when the next is due, is the exception: it
+is logged as an error when the interval passes, but the cycle finishes and
+the daemon goes on. A sample stores what changed since the tree's last one,
+however long ago that was, so a late cycle loses resolution and nothing else,
+while a stopped daemon would lose everything until someone restarts it.
 
 Cycles are timed with the monotonic clock, start to start. The wall clock
 only turns the trees' latest sample times from the database into the delay
@@ -31,7 +37,7 @@ from trackdir.db import (
     latest_started,
 )
 from trackdir.dbcli import DB_UNCHANGED, database, db_message, describe_tree
-from trackdir.interrupts import Overrun, Terminated, deadline, terminate_on_signals
+from trackdir.interrupts import Terminated, call_after, terminate_on_signals
 from trackdir.live import open_live_root
 from trackdir.messages import FatalError
 from trackdir.progress import LogProgress, Progress
@@ -41,8 +47,8 @@ LOGGER_NAME = "trackdir"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"  # with time.gmtime: UTC
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-# Shortest deadline armed for a cycle; setitimer(0) would mean "never".
-_MIN_DEADLINE = 1e-3
+# Shortest time the overrun timer is set to; setitimer(0) would mean "never".
+_MIN_TIMER = 1e-3
 # Seconds between DEBUG lines with the counts of a tree's walk.
 PROGRESS_INTERVAL = 300.0
 
@@ -70,10 +76,6 @@ class _StoppedWhileSampling(Terminated):
     def __init__(self, signum: int, root: Path) -> None:
         super().__init__(signum)
         self.root = root
-
-
-class _OverrunLogged(FatalError):
-    """An overrun, logged already when the deadline passed."""
 
 
 class OnceWarner:
@@ -182,23 +184,31 @@ def run_cycles(
 ) -> NoReturn:
     """Sample every tree once per interval, starting after FIRST_DELAY seconds.
 
-    Returns only by exception: FatalError for a failed sample or an overrun
-    (a cycle not finished one interval after its start), Terminated from a
-    stop signal.
+    Returns only by exception: FatalError for a failed sample, Terminated from
+    a stop signal. An overrun (a cycle not finished one interval after its
+    start) stops nothing: the cycle finishes, and since the next one is then
+    already due it starts at once. Cycles that were due meanwhile are skipped.
     """
     scheduled = clock() + first_delay
     while True:
         sleep(max(0.0, scheduled - clock()))
         start = max(scheduled, clock())
         scheduled = start + config.interval.seconds
-        _cycle(
-            config, log, warn, sample, clock, max(scheduled - clock(), _MIN_DEADLINE)
-        )
-        log.info(
-            "cycle finished in %.1f s; next cycle at %s",
-            clock() - start,
-            _wall_time(scheduled - clock()),
-        )
+        _cycle(config, log, warn, sample, clock, max(scheduled - clock(), _MIN_TIMER))
+        late = clock() - scheduled
+        if late > 0:
+            log.info(
+                "cycle finished in %.1f s, %.1f s past the interval; "
+                "next cycle starts now",
+                clock() - start,
+                late,
+            )
+        else:
+            log.info(
+                "cycle finished in %.1f s; next cycle at %s",
+                clock() - start,
+                _wall_time(-late),
+            )
 
 
 def run(
@@ -237,8 +247,6 @@ def run(
             run_cycles(
                 config, delay, log, warn, sample=sample, clock=clock, sleep=sleep
             )
-    except _OverrunLogged:
-        return 1
     except FatalError as e:
         log.error("%s", e)
         return 1
@@ -265,34 +273,35 @@ def _cycle(
     clock: Callable[[], float],
     seconds: float,
 ) -> None:
-    """Sample every tree in config order; raise FatalError after SECONDS.
+    """Sample every tree in config order; log an ERROR if that takes SECONDS.
 
-    The overrun is logged when SECONDS pass, not after the sample in progress
-    unwinds: its walk waits for running probes, which an unresponsive MDS can
-    hold indefinitely, and the line must not wait with them.
+    The overrun is logged when SECONDS pass, not when the cycle finishes: a
+    walk can be held indefinitely by an unresponsive MDS, and the line must
+    not wait with it. Nothing is interrupted.
     """
     current: TreeConfig | None = None  # the tree being sampled
 
-    def overrun_message() -> str:
-        aborting = (
+    def log_overrun() -> None:
+        sampling = (
             ""
             if current is None
-            else f"; aborting the sample of {current.root}, which stores nothing"
+            else f", sampling {current.root} (tree {current.name})"
         )
-        return (
-            f"cycle did not finish within the interval {config.interval.text}"
-            f"{aborting}. Raise interval or sample fewer or smaller trees."
+        log.error(
+            "cycle still running after the interval %s%s; it will finish, and "
+            "the next cycle starts when it does. Raise interval or sample "
+            "fewer or smaller trees if this repeats.",
+            config.interval.text,
+            sampling,
         )
 
     try:
-        with deadline(seconds, on_expire=lambda: log.error("%s", overrun_message())):
+        with call_after(seconds, log_overrun):
             for tree in config.trees:
                 current = tree
                 result = _sample_tree(config, tree, log, warn, sample, clock)
                 current = None
                 log.info("%s", describe_sample(result))
-    except Overrun:
-        raise _OverrunLogged(overrun_message()) from None
     except Terminated as e:
         if current is None:
             raise

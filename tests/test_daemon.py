@@ -275,45 +275,185 @@ def test_warnings_logged_once(tmp_path):
     assert [level for level, _ in lines(out)].count("WARNING") == 1
 
 
-def test_overrun_exits_1():
-    def slow(opts, warn, *, progress):
-        time.sleep(2)
-        pytest.fail("the deadline did not interrupt the sample")
-
-    log = setup_logging(io.StringIO())
-    with pytest.raises(FatalError) as raised:
-        run_cycles(
-            config_of(Interval(0.2, "0.2s")), 0, log, OnceWarner(log), sample=slow
-        )
-    assert str(raised.value).startswith(
-        f"cycle did not finish within the interval 0.2s; aborting the sample of "
-        f"{ROOTS[0]}, which stores nothing."
-    )
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+OVERRUN_ADVICE = (
+    "it will finish, and the next cycle starts when it does. Raise interval or "
+    "sample fewer or smaller trees if this repeats."
+)
+SHORT = Interval(0.2, "0.2s")  # for tests of the real timer
 
 
-def test_overrun_is_logged_before_the_sample_unwinds():
+def stop_before_cycle(number: int):
+    """Return a sleep for run_cycles that stops it before cycle NUMBER, and
+    the list of the sleeps it was asked for."""
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == number:
+            raise Terminated(signal.SIGTERM)
+
+    return sleep, sleeps
+
+
+def slow_sampler(seconds: float, before_return=lambda: None):
+    def sample(opts, warn, *, progress):
+        time.sleep(seconds)
+        before_return()
+        return sample_result(root=str(opts.root), name=opts.tree)
+
+    return sample
+
+
+def test_overrun_is_logged_when_the_interval_passes_and_the_sample_finishes():
+    before = signal.getsignal(signal.SIGALRM)
     out = io.StringIO()
     log = setup_logging(out)
-    logged_while_unwinding = []
-
-    def stuck(opts, warn, *, progress):
-        try:
-            time.sleep(2)
-        finally:  # where an aborted walk waits for its running probes
-            logged_while_unwinding.extend(lines(out))
-
-    with pytest.raises(FatalError) as raised:
+    logged_during_the_sample = []
+    sample = slow_sampler(0.5, lambda: logged_during_the_sample.extend(lines(out)))
+    sleep, sleeps = stop_before_cycle(2)
+    with pytest.raises(Terminated):
         run_cycles(
-            config_of(Interval(0.2, "0.2s")), 0, log, OnceWarner(log), sample=stuck
+            config_of(SHORT, ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=sample,
+            sleep=sleep,
         )
-    assert logged_while_unwinding == [("ERROR", str(raised.value))]
+    overrun = (
+        "ERROR",
+        f"cycle still running after the interval 0.2s, sampling {ROOTS[0]} "
+        f"(tree t1); {OVERRUN_ADVICE}",
+    )
+    assert logged_during_the_sample == [overrun]
+    logged = lines(out)
+    assert logged[0] == overrun
+    assert [level for level, _ in logged] == ["ERROR", "INFO", "INFO"]
+    assert logged[1][1].startswith("Stored sample")
+    assert re.fullmatch(
+        r"cycle finished in 0\.[5-9] s, 0\.[3-7] s past the interval; "
+        r"next cycle starts now",
+        logged[2][1],
+    )
+    assert sleeps == [0, 0]  # the next cycle was due at once
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) is before
 
 
-def test_overrun_is_logged_once_and_exits_1(tmp_path):
-    def stuck(opts, warn, *, progress):
-        time.sleep(3)
-        pytest.fail("the deadline did not interrupt the sample")
+def test_a_cycle_of_several_intervals_logs_one_error():
+    out = io.StringIO()
+    log = setup_logging(out)
+    sleep, _ = stop_before_cycle(2)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(SHORT, ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=slow_sampler(0.9),
+            sleep=sleep,
+        )
+    assert [level for level, _ in lines(out)].count("ERROR") == 1
+
+
+def test_every_overrunning_cycle_logs_its_error_and_the_daemon_carries_on():
+    out = io.StringIO()
+    log = setup_logging(out)
+    sleep, sleeps = stop_before_cycle(4)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(SHORT, ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=slow_sampler(0.3),
+            sleep=sleep,
+        )
+    logged = lines(out)
+    assert [level for level, _ in logged] == ["ERROR", "INFO", "INFO"] * 3
+    assert sleeps == [0, 0, 0, 0]
+
+
+def test_overrun_between_trees_names_no_tree(monkeypatch):
+    out = io.StringIO()
+    log = setup_logging(out)
+    real = daemon.describe_sample
+    described = []
+
+    def slow_describe(result):
+        if not described:
+            time.sleep(0.5)  # the interval passes while no tree is sampled
+        described.append(result)
+        return real(result)
+
+    monkeypatch.setattr(daemon, "describe_sample", slow_describe)
+    sleep, _ = stop_before_cycle(2)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(SHORT),
+            0,
+            log,
+            OnceWarner(log),
+            sample=slow_sampler(0),
+            sleep=sleep,
+        )
+    errors = [message for level, message in lines(out) if level == "ERROR"]
+    assert errors == [f"cycle still running after the interval 0.2s; {OVERRUN_ADVICE}"]
+    assert len(described) == len(ROOTS)  # the cycle went on to the other tree
+
+
+def test_next_cycle_starts_at_once_after_an_overrun_and_missed_cycles_are_skipped():
+    fake = FakeTime(stop_after=3)
+    out = io.StringIO()
+    log = setup_logging(out)
+
+    def first_takes_long(opts, warn, progress):
+        if not sampler.calls[1:]:
+            fake.now += 2.5 * HOUR - sampler.duration
+
+    sampler = FakeSampler(fake, action=first_takes_long)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(Interval(HOUR, "1h"), ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=sampler,
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+    assert [start for _, start in sampler.calls] == [0, 2.5 * HOUR, 3.5 * HOUR]
+    finished = [m for _, m in lines(out) if m.startswith("cycle finished")]
+    assert finished[0] == (
+        "cycle finished in 9000.0 s, 5400.0 s past the interval; next cycle starts now"
+    )
+    assert finished[1].startswith("cycle finished in 10.0 s; next cycle at ")
+
+
+def test_cycles_run_back_to_back_under_lasting_overload():
+    fake = FakeTime(stop_after=3)
+    log = setup_logging(io.StringIO())
+    sampler = FakeSampler(fake, duration=1.5 * HOUR)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(Interval(HOUR, "1h"), ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=sampler,
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+    assert [start for _, start in sampler.calls] == [0, 1.5 * HOUR, 3 * HOUR]
+    assert fake.sleeps[:3] == [0, 0, 0]
+
+
+def test_sigterm_during_an_overrunning_sample_stops_with_status_0(tmp_path):
+    before = signal.getsignal(signal.SIGALRM)
+
+    def stopped_late(opts, warn, *, progress):
+        time.sleep(1.2)  # past the interval of 1 s
+        raise Terminated(signal.SIGTERM)
 
     config = tmp_path / "trackdir.toml"
     config.write_text(
@@ -321,11 +461,20 @@ def test_overrun_is_logged_once_and_exits_1(tmp_path):
         f'[[tree]]\nname = "t1"\nroot = "{ROOTS[0]}"\nmax_depth = 1\n'
     )
     out = io.StringIO()
-    status = run(config, stream=out, inspect=lambda c, w: (None,), sample=stuck)
-    assert status == 1
-    errors = [message for level, message in lines(out) if level == "ERROR"]
-    assert len(errors) == 1
-    assert errors[0].startswith("cycle did not finish within the interval 1s")
+    status = run(config, stream=out, inspect=lambda c, w: (None,), sample=stopped_late)
+    assert status == 0
+    logged = lines(out)
+    assert [message for level, message in logged if level == "ERROR"] == [
+        f"cycle still running after the interval 1s, sampling {ROOTS[0]} (tree t1); "
+        f"{OVERRUN_ADVICE}"
+    ]
+    assert logged[-1] == (
+        "INFO",
+        f"SIGTERM received while sampling {ROOTS[0]}; nothing was stored for it. "
+        "Stopped.",
+    )
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) is before
 
 
 def test_walk_progress_is_logged_at_debug_once_per_interval(tmp_path):

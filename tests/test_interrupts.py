@@ -4,39 +4,46 @@ import time
 
 import pytest
 
-from trackdir.interrupts import Overrun, Terminated, deadline, terminate_on_signals
+from trackdir.interrupts import Terminated, call_after, terminate_on_signals
 
 
-def test_deadline_raises_overrun():
+def test_call_after_calls_once_and_lets_the_body_finish():
     before = signal.getsignal(signal.SIGALRM)
-    with pytest.raises(Overrun), deadline(0.05):
-        time.sleep(2)
+    calls = []
+    finished = False
+    with call_after(0.05, lambda: calls.append(1)):
+        for _ in range(30):
+            time.sleep(0.01)
+        finished = True
+    assert calls == [1]
+    assert finished
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     assert signal.getsignal(signal.SIGALRM) is before
 
 
-def test_deadline_calls_on_expire_before_the_body_unwinds():
+def test_call_after_does_not_interrupt_a_sleep():
     calls = []
-    seen_while_unwinding = []
-    with pytest.raises(Overrun), deadline(0.05, on_expire=lambda: calls.append(1)):
-        try:
-            time.sleep(2)
-        finally:
-            seen_while_unwinding.extend(calls)
-    assert seen_while_unwinding == [1]
+    clock = time.monotonic()
+    with call_after(0.05, lambda: calls.append(1)):
+        time.sleep(0.3)
+    assert calls == [1]
+    assert time.monotonic() - clock >= 0.3
 
 
-def test_deadline_disarms_on_normal_exit():
+def test_call_after_does_not_call_a_body_that_finished_in_time():
     before = signal.getsignal(signal.SIGALRM)
-    with deadline(5):
+    calls = []
+    with call_after(0.05, lambda: calls.append(1)):
         assert signal.getitimer(signal.ITIMER_REAL)[0] > 0
+    time.sleep(0.1)
+    assert calls == []
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     assert signal.getsignal(signal.SIGALRM) is before
 
 
 @pytest.mark.parametrize("seconds", [0, -1])
-def test_deadline_rejects_non_positive(seconds):
-    with pytest.raises(ValueError), deadline(seconds):
+def test_call_after_rejects_non_positive(seconds):
+    with pytest.raises(ValueError), call_after(seconds, lambda: None):
         pass
 
 

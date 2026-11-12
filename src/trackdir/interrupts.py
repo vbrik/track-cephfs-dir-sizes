@@ -20,10 +20,6 @@ class Terminated(BaseException):
         self.signum = signum
 
 
-class Overrun(BaseException):
-    """A deadline set by `deadline` passed."""
-
-
 @contextlib.contextmanager
 def terminate_on_signals(
     signums: Iterable[int] = (signal.SIGTERM, signal.SIGHUP),
@@ -46,22 +42,19 @@ def terminate_on_signals(
 
 
 @contextlib.contextmanager
-def deadline(
-    seconds: float, on_expire: Callable[[], None] | None = None
-) -> Iterator[None]:
-    """Raise Overrun in the body if it runs longer than SECONDS (> 0).
+def call_after(seconds: float, on_expire: Callable[[], None]) -> Iterator[None]:
+    """Call ON_EXPIRE once if the body still runs after SECONDS (> 0).
 
-    ON_EXPIRE, if given, runs when the deadline passes, before Overrun is
-    raised: unwinding can take long (a walk waits for its running probes).
-    Uses SIGALRM and ITIMER_REAL, so one deadline at a time per process.
+    The body is not interrupted: ON_EXPIRE runs in the main thread, between
+    two of its bytecodes or during a blocking call that then resumes, so it
+    must be short and must not raise. Uses SIGALRM and ITIMER_REAL, so one
+    timer at a time per process; both are restored on exit.
     """
     if seconds <= 0:  # setitimer with 0 would disarm, not fire at once
-        raise ValueError(f"deadline must be in the future: {seconds} s")
+        raise ValueError(f"the time must be in the future: {seconds} s")
 
     def handler(signum: int, frame: object) -> None:
-        if on_expire is not None:
-            on_expire()
-        raise Overrun
+        on_expire()
 
     previous = signal.signal(signal.SIGALRM, handler)
     try:
