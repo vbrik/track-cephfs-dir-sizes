@@ -37,6 +37,7 @@ from trackdir.db import (
     tree_key_of,
     valid_tree_name,
 )
+from trackdir.growth import Window
 from trackdir.model import (
     ROOT,
     DirLimitExceeded,
@@ -1245,8 +1246,39 @@ def test_growth_after_a_large_sample_reads_fresh_statistics(db, monkeypatch):
     store(db, other, many(20_000))
     store(db, later(other, 60), many(20_000, size=2))  # modifies every one
     clock = time.monotonic()
-    stats = db_module.summarize(db, top=3)
+    stats = db_module.summarize(db, top=3, since=[Window("1d", 86_400)])
     assert time.monotonic() - clock < 3
     tree = next(t for t in stats.tree_stats if t.key.fs_path == b"/y")
     (growth,) = tree.growth
     assert growth.positive_own == 20_000
+
+
+def test_growth_queries_use_indexes_on_stale_statistics(db, monkeypatch):
+    """Growth reads a window's rows by sample and the current rows of a few
+    paths; planned from statistics that predate the tree, either could read
+    the whole tree or the whole history instead."""
+    other = stale_tree(db, monkeypatch, 10_000)
+    changed = many(10_000)
+    changed[0] = replace(changed[0], rbytes=10_005)
+    changed[1:6] = [replace(probe, rbytes=2) for probe in changed[1:6]]
+    last = store(db, later(other, 60), changed)  # 6 rows: no ANALYZE
+    tree, first = db.execute(
+        "SELECT tree_id, min(id) FROM trackdir.sample WHERE tree_id ="
+        " (SELECT tree_id FROM trackdir.sample WHERE id = %s) GROUP BY 1",
+        (last,),
+    ).fetchone()
+    paths = [probe.path for probe in changed[:6]]
+    queries = {
+        "_WINDOW_ROWS": {"tree": tree, "after": first, "last": last, "samples": [last]},
+        "_CURRENT_UNKNOWN": {"tree": tree},
+        "_CURRENT_OF": {"tree": tree, "paths": paths},
+        "_WITNESS": {"tree": tree, "lo": b"d000001/", "hi": b"d0000010"},
+        "_WITNESS_ROOT": {"tree": tree, "root": ROOT},
+    }
+    for name, params in queries.items():
+        query = getattr(db_module, name)
+        plan = "\n".join(line for (line,) in db.execute("EXPLAIN " + query, params))
+        assert "Seq Scan on path" not in plan, (name, plan)
+        assert "Seq Scan on current_dir_state" not in plan, (name, plan)
+        if name == "_WINDOW_ROWS":
+            assert "dir_state_sample_id" in plan, plan

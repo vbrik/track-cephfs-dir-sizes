@@ -11,7 +11,7 @@ import os
 import re
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,7 +20,17 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from trackdir.baseline import ROW_COLUMNS, Baseline, Row, SampleDiff, row_of
 from trackdir.capture import CaptureHeader
-from trackdir.growth import DirGrowth, own_growth
+from trackdir.growth import (
+    DEFAULT_WINDOWS,
+    DirGrowth,
+    End,
+    Window,
+    kept_paths,
+    own_growth,
+    window_ends,
+    window_start,
+    witness_dirs,
+)
 from trackdir.model import ROOT, DirLimitExceeded, DirProbe
 
 if TYPE_CHECKING:
@@ -344,14 +354,17 @@ class SampleStats:
 
 @dataclass(frozen=True, slots=True)
 class Growth:
-    """The directories whose own growth was the greatest since a sample.
+    """The directories whose own growth was the greatest in a window: from
+    sample SINCE to the tree's latest sample.
 
-    The window runs from sample SINCE to the tree's latest sample. Directories
-    gone by the end, with an unknown growth or with an own growth of 0 or less
-    are left out.
+    Directories gone by the end, with an unknown growth or with an own growth
+    of 0 or less are left out.
     """
 
+    window: str  # the Window's text, e.g. "7d"
     since: int
+    since_started: datetime
+    clipped: bool  # the tree's history is shorter: SINCE is its first sample
     positive_own: int  # the sum of all positive own growths, shown or not
     dirs: tuple[DirGrowth, ...]  # most own growth first, ties by path
 
@@ -371,7 +384,7 @@ class TreeStats:
     root_now: RootTotals | None  # None if ROOT's current row has no rstats
     root_first: RootTotals | None  # earliest ROOT row with rstats
     recent: tuple[SampleStats, ...]  # newest first
-    growth: tuple[Growth, ...]  # since the first sample, then the second-to-last
+    growth: tuple[Growth, ...]  # one per window it has, in the order asked
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,17 +744,19 @@ def summarize(
     tree: str | None = None,
     recent: int = 10,
     top: int = 3,
+    since: Sequence[Window] = DEFAULT_WINDOWS,
 ) -> DbStats:
     """Return the database's statistics, with those of the tree named TREE or
     of all trees.
 
     An unknown TREE gives no tree statistics. Each tree lists its RECENT
-    newest samples, and the TOP directories with the most own growth since its
-    first sample, given 2 samples, and since its second-to-last, given 3; TOP 0
-    skips growth. Without growth nothing depends on how much history is
-    stored: counts come from the sample rows, totals from the current state
-    and from ROOT's first row with rstats. Growth reads each tree's current
-    state, and for each window the earlier rows of the paths changed since. One
+    newest samples, and the TOP directories with the most own growth in each
+    window of SINCE, given 2 samples (see growth.window_start); TOP 0 skips
+    growth. Without growth nothing depends on how much history is stored:
+    counts come from the sample rows, totals from the current state and from
+    ROOT's first row with rstats. Growth reads, for each window, the rows
+    stored in it, the tree's current directories without rstats, and the
+    current rows of the directories these name and of their ancestors. One
     READ ONLY REPEATABLE READ transaction keeps all numbers consistent. Raises
     SchemaMissing or SchemaVersionMismatch unless the schema is current.
     """
@@ -770,7 +785,9 @@ def summarize(
         }
         errors = _group(cur.execute(_CURRENT_ERRORS, params))
         growth = {
-            tree_id: _growth(cur, tree_id, max_depth, samples.get(tree_id, []), top)
+            tree_id: _growth(
+                cur, tree_id, max_depth, samples.get(tree_id, []), top, since
+            )
             for tree_id, *_, max_depth in trees
         }
     tree_stats = tuple(
@@ -836,23 +853,51 @@ WHERE error_stage IS NOT NULL AND {_IN_TREE.format(column="tree_id")}
 GROUP BY tree_id, error_stage, error_code
 """
 
-# Each current path of tree %(tree)s, with its rbytes and error stage.
-_CURRENT_ENDS = """SELECT path, rbytes, error_stage FROM trackdir.current_dir_state
-WHERE tree_id = %(tree)s
+# The queries of _growth, for tree %(tree)s. current_dir_state.path has no
+# index: paths are found through path's (tree_id, path) index, then current
+# rows by primary key.
+#
+# W, the paths with a row in samples %(samples)s, the tree's samples in the id
+# range (%(after)s, %(last)s]: each one's first row's created, prev_rbytes and
+# prev_error_stage, then its current row's presence, rbytes and error stage.
+# The range lets the BRIN index find the rows; the list drops other trees'.
+_WINDOW_ROWS = """SELECT p.path, f.created, f.prev_rbytes, f.prev_error_stage,
+       c.path_id IS NOT NULL, c.rbytes, c.error_stage
+FROM (
+    SELECT DISTINCT ON (d.path_id) d.path_id, d.created, d.prev_rbytes,
+           d.prev_error_stage
+    FROM trackdir.dir_state d
+    WHERE d.sample_id > %(after)s AND d.sample_id <= %(last)s
+      AND d.sample_id = ANY(%(samples)s)
+    ORDER BY d.path_id, d.sample_id
+) f
+JOIN trackdir.path p ON p.id = f.path_id
+LEFT JOIN trackdir.current_dir_state c
+       ON c.tree_id = %(tree)s AND c.path_id = f.path_id
 """
-# Each path with a row in samples %(later)s, with its latest row in samples
-# %(earlier)s, oldest first: rbytes, error stage and deleted, or NULLs if none.
-_START_ENDS = """WITH later AS (
-    SELECT DISTINCT path_id FROM trackdir.dir_state WHERE sample_id = ANY(%(later)s)
-)
-SELECT p.path, b.rbytes, b.error_stage, b.deleted
-FROM later l JOIN trackdir.path p ON p.id = l.path_id LEFT JOIN (
-    SELECT DISTINCT ON (d.path_id) d.path_id, d.rbytes, d.error_stage, d.deleted
-    FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
-    WHERE d.sample_id = ANY(%(earlier)s)
-      AND d.path_id IN (SELECT path_id FROM later)
-    ORDER BY d.path_id, s.started DESC, s.id DESC
-) b ON b.path_id = l.path_id
+# The current paths without rbytes, from the partial index.
+_CURRENT_UNKNOWN = """SELECT p.path, c.error_stage
+FROM trackdir.current_dir_state c JOIN trackdir.path p ON p.id = c.path_id
+WHERE c.tree_id = %(tree)s AND c.rbytes IS NULL
+"""
+# The current rows of the paths %(paths)s.
+_CURRENT_OF = """SELECT p.path, c.rbytes, c.error_stage
+FROM trackdir.path p
+JOIN trackdir.current_dir_state c ON c.tree_id = p.tree_id AND c.path_id = p.id
+WHERE p.tree_id = %(tree)s AND p.path = ANY(%(paths)s)
+"""
+# One current path strictly below a directory D: between D/ and D0 in bytes,
+# as "0" follows "/". It may step over paths below D that are gone.
+_WITNESS = """SELECT p.path FROM trackdir.path p
+JOIN trackdir.current_dir_state c ON c.tree_id = p.tree_id AND c.path_id = p.id
+WHERE p.tree_id = %(tree)s AND p.path > %(lo)s AND p.path < %(hi)s
+ORDER BY p.path LIMIT 1
+"""
+# One current path below ROOT: any but ROOT.
+_WITNESS_ROOT = """SELECT p.path FROM trackdir.path p
+JOIN trackdir.current_dir_state c ON c.tree_id = p.tree_id AND c.path_id = p.id
+WHERE p.tree_id = %(tree)s AND p.path <> %(root)s
+LIMIT 1
 """
 
 
@@ -862,35 +907,78 @@ def _growth(
     max_depth: int,
     samples: list[tuple],
     top: int,
+    since: Sequence[Window],
 ) -> tuple[Growth, ...]:
-    """Return tree TREE_ID's growth windows; see summarize.
+    """Return tree TREE_ID's growth over the windows SINCE; see summarize.
 
-    SAMPLES are the tree's _SAMPLES rows, oldest first, without tree_id. A
-    path's state at a window's start is its current one unless it has rows in
-    later samples, so only those paths' earlier rows are read.
+    SAMPLES are the tree's _SAMPLES rows, oldest first, without tree_id.
+    Windows that start at the same sample are read once.
     """
     if not top or len(samples) < 2:
         return ()
     ids = [sample_id for sample_id, *_ in samples]
-    current = {
-        path: (rbytes, stage)
-        for path, rbytes, stage in cur.execute(_CURRENT_ENDS, {"tree": tree_id})
+    started = [row[1] for row in samples]
+    tree = {"tree": tree_id}
+    # current states read so far; first those whose growth is unknown
+    current: dict[bytes, End] = {
+        path: (None, stage) for path, stage in cur.execute(_CURRENT_UNKNOWN, tree)
     }
-    starts = [0] if len(samples) < 3 else [0, len(samples) - 2]
+    unknown = set(current)
+    found: dict[int, tuple[int, tuple[DirGrowth, ...]]] = {}
     windows = []
-    for start in starts:
-        params = {"earlier": ids[: start + 1], "later": ids[start + 1 :]}
-        changed = {
-            path: None if deleted in (None, True) else (rbytes, stage)
-            for path, rbytes, stage, deleted in cur.execute(_START_ENDS, params)
-        }
-        ends = {path: (changed.get(path, now), now) for path, now in current.items()}
-        for path, then in changed.items():
-            if path not in current and then is not None:
-                ends[path] = (then, None)
-        positive, dirs = own_growth(ends, max_depth, top)
-        windows.append(Growth(ids[start], positive, dirs))
+    for window in since:
+        start, clipped = window_start(started, window.seconds)
+        if start not in found:
+            found[start] = _window_growth(
+                cur, tree_id, ids, start, max_depth, top, current, unknown
+            )
+        positive, dirs = found[start]
+        windows.append(
+            Growth(window.text, ids[start], started[start], clipped, positive, dirs)
+        )
     return tuple(windows)
+
+
+def _window_growth(
+    cur: "psycopg.Cursor",
+    tree_id: int,
+    ids: list[int],
+    start: int,
+    max_depth: int,
+    top: int,
+    current: dict[bytes, End],
+    unknown: set[bytes],
+) -> tuple[int, tuple[DirGrowth, ...]]:
+    """Return own_growth from sample IDS[START] to the last of IDS.
+
+    CURRENT caches the current states read so far, and gains those this reads;
+    UNKNOWN are the current paths without rbytes.
+    """
+    params = {
+        "tree": tree_id,
+        "after": ids[start],
+        "last": ids[-1],
+        "samples": ids[start + 1 :],
+    }
+    changed: dict[bytes, tuple[End, End]] = {}
+    for path, created, rbytes, stage, present, now, now_stage in cur.execute(
+        _WINDOW_ROWS, params
+    ):
+        then = None if created else (rbytes, stage)
+        changed[path] = (then, (now, now_stage) if present else None)
+    witnesses = []
+    for path in witness_dirs(changed):
+        if path == ROOT:
+            query, bounds = _WITNESS_ROOT, {"root": ROOT}
+        else:
+            query, bounds = _WITNESS, {"lo": path + b"/", "hi": path + b"0"}
+        witnesses += [w for (w,) in cur.execute(query, {"tree": tree_id, **bounds})]
+    kept = kept_paths([*changed, *unknown, *witnesses])
+    missing = [path for path in kept if path not in changed and path not in current]
+    if missing:
+        rows = cur.execute(_CURRENT_OF, {"tree": tree_id, "paths": missing})
+        current.update((path, (rbytes, stage)) for path, rbytes, stage in rows)
+    return own_growth(window_ends(changed, current, kept), max_depth, top)
 
 
 def _group(rows: Iterator[tuple]) -> dict[int, list[tuple]]:

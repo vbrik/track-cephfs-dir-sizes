@@ -28,7 +28,7 @@ from trackdir.db import (
     summarize,
 )
 from trackdir.dbcli import display_path, tree_identity
-from trackdir.growth import DirGrowth
+from trackdir.growth import DirGrowth, Window, own_growth
 from trackdir.model import (
     ROOT,
     DirProbe,
@@ -41,6 +41,9 @@ from trackdir.model import (
 from trackdir.summary import format_bytes, render_json, render_text
 
 DEPTH = 2  # of most replays; SUBTREE has 380 directories down to it
+# A window longer than any test's history: it starts at the first sample
+SINCE_FIRST = Window("10y", 10 * 365 * 86_400)
+HOUR = Window("1h", 3600)  # captures made by edit() are an hour apart or more
 
 
 def edit(base: Capture, tmp_path: Path, name: str, hours: float, **edits) -> Path:
@@ -127,6 +130,45 @@ def current(db) -> tuple[int, Counter[tuple[str, str]]]:
         "SELECT error_stage, error_code FROM trackdir.current_dir_state"
     ).fetchall()
     return len(rows), Counter((s, c) for s, c in rows if s is not None)
+
+
+def grew(db, *windows: Window, top: int = 3) -> tuple[Growth, ...]:
+    """The first tree's growth over WINDOWS, by default SINCE_FIRST."""
+    return summarize(db, top=top, since=windows or [SINCE_FIRST]).tree_stats[0].growth
+
+
+def started_of(db, sample_id: int) -> datetime:
+    return db.execute(
+        "SELECT started FROM trackdir.sample WHERE id = %s", (sample_id,)
+    ).fetchone()[0]
+
+
+def full_growth(db, tree_id: int, max_depth: int, start_id: int, top: int):
+    """own_growth over every path of the tree, from each path's latest row up
+    to sample START_ID to its current row: what _growth computed before it
+    read only a window's rows."""
+    current = {
+        bytes(path): (rbytes, stage)
+        for path, rbytes, stage in db.execute(
+            "SELECT path, rbytes, error_stage FROM trackdir.current_dir_state"
+            " WHERE tree_id = %s",
+            (tree_id,),
+        )
+    }
+    start = {
+        bytes(path): (rbytes, stage)
+        for path, rbytes, stage, deleted in db.execute(
+            "SELECT DISTINCT ON (d.path_id) p.path, d.rbytes, d.error_stage,"
+            " d.deleted FROM trackdir.dir_state d"
+            " JOIN trackdir.path p ON p.id = d.path_id"
+            " WHERE p.tree_id = %s AND d.sample_id <= %s"
+            " ORDER BY d.path_id, d.sample_id DESC",
+            (tree_id, start_id),
+        )
+        if not deleted
+    }
+    ends = {p: (start.get(p), current.get(p)) for p in start.keys() | current.keys()}
+    return own_growth(ends, max_depth, top)
 
 
 @pytest.fixture
@@ -298,17 +340,19 @@ def test_growth_needs_two_samples(db, initial):
     assert tree.growth == ()
 
 
-def test_growth_since_first_and_previous_sample(db, dsn, subtree, initial, tmp_path):
+def test_growth_over_two_windows(db, dsn, subtree, initial, tmp_path):
     a, b = at_depth(subtree, 1)[:2]
     size = {p: subtree.probes[p].rbytes for p in (ROOT, a, b)}
     new = b"0000new"
     path = edit(subtree, tmp_path, "second", 1, touch=[a, a, a, b, new, new], add=[new])
     second = replay(dsn, path, max_depth=DEPTH)
-    (tree,) = summarize(db, top=5).tree_stats
     # adding NEW touched ROOT once more than its children grew
-    assert tree.growth == (
+    assert grew(db, top=5) == (
         Growth(
+            window="10y",
             since=initial.sample_id,
+            since_started=started_of(db, initial.sample_id),
+            clipped=True,
             positive_own=7,
             dirs=(
                 DirGrowth(a, size[a], size[a] + 3, 3, False),
@@ -320,10 +364,12 @@ def test_growth_since_first_and_previous_sample(db, dsn, subtree, initial, tmp_p
     )
     third = edit(load_capture(path), tmp_path, "third", 1, touch=[b] * 4)
     replay(dsn, third, max_depth=DEPTH)
-    (tree,) = summarize(db).tree_stats
-    since_first, since_previous = tree.growth
+    since_first, since_previous = grew(db, SINCE_FIRST, HOUR)
     assert since_first == Growth(
+        window="10y",
         since=initial.sample_id,
+        since_started=started_of(db, initial.sample_id),
+        clipped=True,
         positive_own=11,
         dirs=(
             DirGrowth(b, size[b], size[b] + 5, 5, False),
@@ -332,7 +378,10 @@ def test_growth_since_first_and_previous_sample(db, dsn, subtree, initial, tmp_p
         ),
     )
     assert since_previous == Growth(
+        window="1h",
         since=second.sample_id,
+        since_started=started_of(db, second.sample_id),
+        clipped=False,
         positive_own=4,
         dirs=(DirGrowth(b, size[b] + 1, size[b] + 5, 4, False),),
     )
@@ -344,15 +393,12 @@ def test_growth_ranks_every_depth_by_own_growth(db, dsn, subtree, initial, tmp_p
     size = {p: subtree.probes[p].rbytes for p in (parent, child)}
     touch = [child, child, parent]
     replay(dsn, edit(subtree, tmp_path, "second", 1, touch=touch), max_depth=DEPTH)
-    (growth,) = summarize(db, top=10).tree_stats[0].growth
+    (growth,) = grew(db, top=10)
     # CHILD is at max depth: its own growth is its subtree's
-    assert growth == Growth(
-        since=initial.sample_id,
-        positive_own=3,
-        dirs=(
-            DirGrowth(child, size[child], size[child] + 2, 2, True),
-            DirGrowth(parent, size[parent], size[parent] + 3, 1, False),
-        ),
+    assert (growth.since, growth.positive_own) == (initial.sample_id, 3)
+    assert growth.dirs == (
+        DirGrowth(child, size[child], size[child] + 2, 2, True),
+        DirGrowth(parent, size[parent], size[parent] + 3, 1, False),
     )
 
 
@@ -360,7 +406,7 @@ def test_growth_of_root_at_max_depth_is_its_subtree(db, dsn, subtree, tmp_path):
     sample.run_db_init(dsn)
     replay(dsn, SUBTREE, max_depth=0)
     replay(dsn, edit(subtree, tmp_path, "second", 1, touch=[ROOT]), max_depth=0)
-    (growth,) = summarize(db).tree_stats[0].growth
+    (growth,) = grew(db)
     rbytes = subtree.probes[ROOT].rbytes
     assert growth.dirs == (DirGrowth(ROOT, rbytes, rbytes + 1, 1, True),)
 
@@ -376,16 +422,18 @@ def test_growth_is_unknown_below_a_dir_unlisted_at_the_start(
     second = replay(dsn, readdir_failed(second, parent), max_depth=DEPTH)
     third = edit(subtree, tmp_path, "third", 2, touch=[child] * 3)
     replay(dsn, third, max_depth=DEPTH)
-    since_first, since_previous = summarize(db, top=10).tree_stats[0].growth
+    since_first, since_previous = grew(db, SINCE_FIRST, HOUR, top=10)
     size = {p: subtree.probes[p].rbytes for p in (parent, child)}
     assert since_first.dirs == (
         DirGrowth(child, size[child], size[child] + 3, 3, True),
     )
     # CHILD's row at the start predates the window: its growth is unknown
-    assert since_previous == Growth(
-        since=second.sample_id,
-        positive_own=1,
-        dirs=(DirGrowth(parent, size[parent] + 2, size[parent] + 3, 1, True),),
+    assert (since_previous.since, since_previous.positive_own) == (
+        second.sample_id,
+        1,
+    )
+    assert since_previous.dirs == (
+        DirGrowth(parent, size[parent] + 2, size[parent] + 3, 1, True),
     )
 
 
@@ -399,7 +447,7 @@ def test_growth_is_unknown_below_a_dir_unlisted_at_the_end(db, dsn, subtree, tmp
     third = edit(subtree, tmp_path, "third", 2, touch=[child] * 5)
     eacces = ProbeError(Stage.OPEN, "EACCES")
     replay(dsn, with_errors(third, eacces, parent), max_depth=DEPTH)
-    since_first, since_previous = summarize(db, top=10).tree_stats[0].growth
+    since_first, since_previous = grew(db, SINCE_FIRST, HOUR, top=10)
     root = subtree.probes[ROOT].rbytes
     # CHILD's latest row predates the window's end: its growth is unknown
     assert since_first.dirs == (DirGrowth(ROOT, root, root + 5, 5, True),)
@@ -412,7 +460,7 @@ def test_growth_of_a_dir_unlisted_at_the_end_is_its_subtree(
     leaf = next(p for p in at_depth(subtree, 1) if not subtree.probes[p].children)
     second = edit(subtree, tmp_path, "second", 1, touch=[leaf])
     replay(dsn, readdir_failed(second, leaf), max_depth=DEPTH)
-    (growth,) = summarize(db).tree_stats[0].growth
+    (growth,) = grew(db)
     rbytes = subtree.probes[leaf].rbytes
     assert growth.dirs == (DirGrowth(leaf, rbytes, rbytes + 1, 1, True),)
 
@@ -420,9 +468,9 @@ def test_growth_of_a_dir_unlisted_at_the_end_is_its_subtree(
 def test_growth_honors_top_and_ties_by_path(db, dsn, subtree, initial, tmp_path):
     touched = sorted(at_depth(subtree, 2)[:3], reverse=True)
     replay(dsn, edit(subtree, tmp_path, "second", 1, touch=touched), max_depth=DEPTH)
-    (growth,) = summarize(db, top=2).tree_stats[0].growth
+    (growth,) = grew(db, top=2)
     assert [d.path for d in growth.dirs] == sorted(touched)[:2]
-    assert summarize(db, top=0).tree_stats[0].growth == ()
+    assert grew(db, top=0) == ()
 
 
 def test_growth_subtracts_deleted_dirs(db, dsn, subtree, initial, tmp_path):
@@ -431,13 +479,10 @@ def test_growth_subtracts_deleted_dirs(db, dsn, subtree, initial, tmp_path):
     shrunk = root - subtree.probes[removed].rbytes + 4
     second = edit(subtree, tmp_path, "second", 1, remove=[removed])
     replay(dsn, with_rbytes(second, {ROOT: shrunk}), max_depth=DEPTH)
-    (growth,) = summarize(db).tree_stats[0].growth
+    (growth,) = grew(db)
     # the 4 bytes of ROOT's own files grew while its total shrank
-    assert growth == Growth(
-        since=initial.sample_id,
-        positive_own=4,
-        dirs=(DirGrowth(ROOT, root, shrunk, 4, False),),
-    )
+    assert (growth.since, growth.positive_own) == (initial.sample_id, 4)
+    assert growth.dirs == (DirGrowth(ROOT, root, shrunk, 4, False),)
 
 
 def test_growth_skips_dirs_without_rstats_at_either_end(db, dsn, subtree, tmp_path):
@@ -454,7 +499,7 @@ def test_growth_skips_dirs_without_rstats_at_either_end(db, dsn, subtree, tmp_pa
     touch = [ROOT, broken_after, kid_before, kid_after, grown, grown]
     second = edit(subtree, tmp_path, "second", 1, touch=touch)
     replay(dsn, with_errors(second, eio, broken_after), max_depth=DEPTH)
-    (growth,) = summarize(db, top=10).tree_stats[0].growth
+    (growth,) = grew(db, top=10)
     size = {p: subtree.probes[p].rbytes for p in (ROOT, grown, kid_before, kid_after)}
     # ROOT's own growth holds broken_after's own, so it may hold a subdirectory's
     expected = [
@@ -479,7 +524,7 @@ def test_growth_counts_new_only_below_a_listed_ancestor(db, dsn, subtree, tmp_pa
     touch = [below_eio, *[below_listed] * 2, *[kid] * 3]
     second = edit(subtree, tmp_path, "second", 1, add=added, touch=touch)
     replay(dsn, second, max_depth=2)
-    (growth,) = summarize(db, top=10).tree_stats[0].growth
+    (growth,) = grew(db, top=10)
     root, size = subtree.probes[ROOT].rbytes, subtree.probes[listed].rbytes
     # hidden's children were unseen at the start, not new; eio's growth is
     # unknown, so ROOT's own growth holds it; each add touched its parent chain
@@ -492,6 +537,112 @@ def test_growth_counts_new_only_below_a_listed_ancestor(db, dsn, subtree, tmp_pa
         DirGrowth(listed, size, size + 3, 1, False),
     ]
     assert growth.dirs == tuple(sorted(expected, key=lambda d: (-d.own, d.path)))
+
+
+def samples_of(db) -> list[tuple[int, datetime]]:
+    """The first tree's samples, oldest first: (id, started)."""
+    return db.execute(
+        "SELECT id, started FROM trackdir.sample ORDER BY started, id"
+    ).fetchall()
+
+
+def test_growth_matches_the_full_computation_for_every_start(
+    db, dsn, subtree, initial, tmp_path
+):
+    with_children = [p for p in at_depth(subtree, 1) if subtree.probes[p].children]
+    removed, unlisted = with_children[:2]
+    a, b = [p for p in at_depth(subtree, 1) if p not in (removed, unlisted)][:2]
+    new = b"0000new"
+    steps = [edit(subtree, tmp_path, "s2", 1, touch=[a, a, b])]
+    steps.append(edit(load_capture(steps[-1]), tmp_path, "s3", 1, remove=[removed]))
+    steps.append(
+        edit(load_capture(steps[-1]), tmp_path, "s4", 1, add=[new], touch=[new])
+    )
+    listed = steps[-1]
+    touched = edit(load_capture(listed), tmp_path, "s5", 1, touch=[unlisted])
+    steps.append(readdir_failed(touched, unlisted))
+    # listed again, its children unchanged since s4: only a witness tells
+    # growth below it is unknown from s5 on
+    steps.append(edit(load_capture(listed), tmp_path, "s6", 2, touch=[unlisted] * 3))
+    steps.append(edit(load_capture(steps[-1]), tmp_path, "s7", 1, add=[removed]))
+    for step in steps:
+        replay(dsn, step, max_depth=DEPTH)
+    samples = samples_of(db)
+    assert len(samples) == 7
+    latest = samples[-1][1]
+    tree_id = db.execute("SELECT id FROM trackdir.tree").fetchone()[0]
+    for sample_id, started in samples[:-1]:
+        window = Window("w", int((latest - started).total_seconds()))
+        (growth,) = grew(db, window, top=1000)
+        assert (growth.since, growth.clipped) == (sample_id, False)
+        expected = full_growth(db, tree_id, DEPTH, sample_id, 1000)
+        assert (growth.positive_own, growth.dirs) == expected, sample_id
+
+
+def test_growth_marks_a_dir_unlisted_only_at_the_start(
+    db, dsn, subtree, initial, tmp_path
+):
+    unlisted = next(p for p in at_depth(subtree, 1) if subtree.probes[p].children)
+    size = subtree.probes[unlisted].rbytes
+    second = edit(subtree, tmp_path, "second", 1, touch=[unlisted])
+    replay(dsn, readdir_failed(second, unlisted), max_depth=DEPTH)
+    third = edit(subtree, tmp_path, "third", 2, touch=[unlisted] * 3)
+    replay(dsn, third, max_depth=DEPTH)
+    (growth,) = grew(db, HOUR, top=10)
+    # its children were unread at the window's start and are not stored in it
+    assert growth.dirs == (DirGrowth(unlisted, size + 1, size + 3, 2, True),)
+
+
+def test_growth_of_a_path_recreated_in_the_window_is_new(
+    db, dsn, subtree, initial, tmp_path
+):
+    removed = next(p for p in at_depth(subtree, 1) if subtree.probes[p].children)
+    second = edit(subtree, tmp_path, "second", 1, remove=[removed])
+    replay(dsn, second, max_depth=DEPTH)
+    third = edit(
+        load_capture(second), tmp_path, "third", 1, add=[removed], touch=[removed]
+    )
+    replay(dsn, third, max_depth=DEPTH)
+    (growth,) = grew(db, HOUR, top=10)
+    assert DirGrowth(removed, None, 1, 1, False) in growth.dirs
+
+
+def test_growth_of_a_window_without_rows_is_empty(db, dsn, subtree, initial, tmp_path):
+    replay(dsn, edit(subtree, tmp_path, "same", 1), max_depth=DEPTH)
+    assert grew(db, Window("1s", 1)) == (
+        Growth(
+            window="1s",
+            since=initial.sample_id,
+            since_started=started_of(db, initial.sample_id),
+            clipped=False,
+            positive_own=0,
+            dirs=(),
+        ),
+    )
+
+
+def test_windows_resolving_to_one_start_are_read_once(
+    db, dsn, subtree, initial, tmp_path, monkeypatch
+):
+    import psycopg
+
+    from trackdir import db as db_module
+
+    a = at_depth(subtree, 1)[0]
+    replay(dsn, edit(subtree, tmp_path, "second", 1, touch=[a]), max_depth=DEPTH)
+    statements = []
+    real = psycopg.Cursor.execute
+
+    def recording(self, query, *args, **kwargs):
+        statements.append(str(query))
+        return real(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", recording)
+    day, week = summarize(db).tree_stats[0].growth
+    assert (day.window, week.window) == ("1d", "7d")
+    assert day == replace(week, window="1d")
+    assert day.clipped and day.dirs
+    assert statements.count(db_module._WINDOW_ROWS) == 1
 
 
 T1 = datetime(2026, 10, 16, 20, 48, 11, 500_000, tzinfo=UTC)
@@ -530,7 +681,10 @@ def stats_of(**changes) -> DbStats:
         recent=(newest,),
         growth=(
             Growth(
+                window="7d",
                 since=5,
+                since_started=T1 - timedelta(days=1),
+                clipped=True,
                 positive_own=2**40,
                 dirs=(
                     DirGrowth(b"alpha/x", 2**40, 2**40 + 2**39, 2**39, True),
@@ -538,7 +692,14 @@ def stats_of(**changes) -> DbStats:
                     DirGrowth(b".", 3 * 2**40, 3 * 2**40 + 2**39, 2**20, False),
                 ),
             ),
-            Growth(since=6, positive_own=0, dirs=()),
+            Growth(
+                window="1h",
+                since=6,
+                since_started=T1 - timedelta(hours=1),
+                clipped=False,
+                positive_own=0,
+                dirs=(),
+            ),
         ),
     )
     return DbStats(5, 1, 2, 144434, 39542784, (replace(tree, **changes),))
@@ -618,7 +779,14 @@ def test_render_text_without_trees():
 
 
 def test_render_text_escapes_undecodable_paths():
-    growth = Growth(5, positive_own=1, dirs=(DirGrowth(b"caf\xe9", 1, 2, 1, False),))
+    growth = Growth(
+        "1d",
+        5,
+        T1,
+        False,
+        positive_own=1,
+        dirs=(DirGrowth(b"caf\xe9", 1, 2, 1, False),),
+    )
     stats = stats_of(key=replace(KEY, fs_path=b"/caf\xe9"), growth=(growth,))
     text = render_text(stats)
     text.encode()
@@ -673,7 +841,14 @@ def test_render_json():
         "own": 2**30,
         "subtree": False,
     }
-    assert since_previous == {"since": 6, "positive_own": 0, "dirs": []}
+    assert since_previous == {
+        "window": "1h",
+        "since": 6,
+        "since_started": "2026-10-16T19:48:11.500000+00:00",
+        "clipped": False,
+        "positive_own": 0,
+        "dirs": [],
+    }
 
 
 def test_render_json_keeps_undecodable_paths_ascii():
@@ -738,8 +913,9 @@ def test_cli_top_selects_growth(initial, dsn, subtree, tmp_path, capsys):
         shown = os.fsdecode(fs_absolute(fs_path, path))
         assert f"    +1 B    25%   +1 B  {shown} (subtree)\n" in stdout
     assert main(["db", "summary", "--db", dsn, "--top", "1", "--json"]) == 0
-    (growth,) = json.loads(capsys.readouterr().out)["trees"][0]["growth"]
-    assert (growth["positive_own"], growth["dirs"][0]["own"]) == (4, 1)
+    day, week = json.loads(capsys.readouterr().out)["trees"][0]["growth"]
+    assert (day["positive_own"], day["dirs"][0]["own"]) == (4, 1)
+    assert day["dirs"] == week["dirs"]  # both start at the first sample
     assert main(["db", "summary", "--db", dsn, "--top", "0"]) == 0
     assert "grew most" not in capsys.readouterr().out
 
