@@ -1,4 +1,5 @@
-"""Signals turned into exceptions, so a run unwinds and cleans up.
+"""Signals turned into exceptions, so a run unwinds and cleans up; and a
+timer that interrupts nothing (call_after).
 
 Both exceptions derive from BaseException, so no `except Exception` on the
 way up swallows them. Unwinding is what removes capture's hidden temp file,
@@ -9,6 +10,7 @@ there.
 
 import contextlib
 import signal
+import threading
 from collections.abc import Callable, Iterable, Iterator
 
 
@@ -43,23 +45,23 @@ def terminate_on_signals(
 
 @contextlib.contextmanager
 def call_after(seconds: float, on_expire: Callable[[], None]) -> Iterator[None]:
-    """Call ON_EXPIRE once if the body still runs after SECONDS (> 0).
+    """Call ON_EXPIRE once, from a timer thread, if the body still runs after
+    SECONDS (> 0); wait for that call to finish before returning.
 
-    The body is not interrupted: ON_EXPIRE runs in the main thread, between
-    two of its bytecodes or during a blocking call that then resumes, so it
-    must be short and must not raise. Uses SIGALRM and ITIMER_REAL, so one
-    timer at a time per process; both are restored on exit.
+    Nothing is interrupted, and no signal is used. A signal would run its
+    handler in the main thread, in the middle of whatever it is doing: inside
+    a log write (which then fails or interleaves), or not until a call stuck
+    in the kernel returns; and a call made through ctypes, such as openat2,
+    would fail with EINTR instead of being retried.
     """
-    if seconds <= 0:  # setitimer with 0 would disarm, not fire at once
+    if seconds <= 0:
         raise ValueError(f"the time must be in the future: {seconds} s")
-
-    def handler(signum: int, frame: object) -> None:
-        on_expire()
-
-    previous = signal.signal(signal.SIGALRM, handler)
+    timer = threading.Timer(seconds, on_expire)
+    timer.name = "trackdir-call-after"
+    timer.daemon = True  # a hung ON_EXPIRE must not keep the process alive
+    timer.start()
     try:
-        signal.setitimer(signal.ITIMER_REAL, seconds)
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        timer.cancel()
+        timer.join()

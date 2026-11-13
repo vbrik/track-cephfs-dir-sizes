@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import signal
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -275,6 +276,10 @@ def test_warnings_logged_once(tmp_path):
     assert [level for level, _ in lines(out)].count("WARNING") == 1
 
 
+def no_timer_threads() -> bool:
+    return not [t for t in threading.enumerate() if t.name == "trackdir-call-after"]
+
+
 OVERRUN_ADVICE = (
     "it will finish, and the next cycle starts when it does. Raise interval or "
     "sample fewer or smaller trees if this repeats."
@@ -336,8 +341,8 @@ def test_overrun_is_logged_when_the_interval_passes_and_the_sample_finishes():
         logged[2][1],
     )
     assert sleeps == [0, 0]  # the next cycle was due at once
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     assert signal.getsignal(signal.SIGALRM) is before
+    assert no_timer_threads()
 
 
 def test_a_cycle_of_several_intervals_logs_one_error():
@@ -473,8 +478,8 @@ def test_sigterm_during_an_overrunning_sample_stops_with_status_0(tmp_path):
         f"SIGTERM received while sampling {ROOTS[0]}; nothing was stored for it. "
         "Stopped.",
     )
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     assert signal.getsignal(signal.SIGALRM) is before
+    assert no_timer_threads()
 
 
 def test_walk_progress_is_logged_at_debug_once_per_interval(tmp_path):
@@ -720,3 +725,42 @@ def test_daemon_help_describes_an_overrun_as_logged_not_fatal(capsys):
     for old in ("aborted", "exits once", "(including an overrun)"):
         assert old not in text
     assert "1 error, 2 usage error" in text
+
+
+class SlowStream(io.StringIO):
+    """A log stream whose writes of a "Stored sample" line take 0.5 s, as a
+    pipe that is not being drained would; records writes made during it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing = False
+        self.reentered = []
+
+    def write(self, text: str) -> int:
+        if self.writing:
+            self.reentered.append(text)
+        self.writing = True
+        try:
+            if "Stored sample" in text:
+                time.sleep(0.5)
+            return super().write(text)
+        finally:
+            self.writing = False
+
+
+def test_overrun_line_waits_for_a_log_write_in_progress():
+    out = SlowStream()
+    log = setup_logging(out)
+    sleep, _ = stop_before_cycle(2)
+    with pytest.raises(Terminated):
+        run_cycles(
+            config_of(SHORT, ROOTS[:1]),
+            0,
+            log,
+            OnceWarner(log),
+            sample=slow_sampler(0),
+            sleep=sleep,
+        )
+    assert out.reentered == []
+    levels = [level for level, _ in lines(out)]
+    assert levels == ["INFO", "ERROR", "INFO"]

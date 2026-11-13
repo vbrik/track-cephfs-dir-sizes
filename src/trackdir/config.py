@@ -22,7 +22,7 @@ from trackdir.model import MAX_DEPTH_LIMIT, MAX_DIRS_LIMIT
 
 _INTERVAL = re.compile(r"([1-9][0-9]*)([smhd])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-# Longest interval in days; far beyond any use, and within what setitimer,
+# Longest interval in days; far beyond any use, and within what a timer,
 # timedelta and sleep accept.
 MAX_INTERVAL_DAYS = 365
 _LOG_LEVELS = {

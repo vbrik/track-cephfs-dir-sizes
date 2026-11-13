@@ -47,7 +47,7 @@ LOGGER_NAME = "trackdir"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"  # with time.gmtime: UTC
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-# Shortest time the overrun timer is set to; setitimer(0) would mean "never".
+# Shortest time the overrun timer is set to, when a cycle starts late.
 _MIN_TIMER = 1e-3
 # Seconds between DEBUG lines with the counts of a tree's walk.
 PROGRESS_INTERVAL = 300.0

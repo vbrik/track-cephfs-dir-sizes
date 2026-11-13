@@ -34,9 +34,11 @@
   a run unwinds and cleans up: `walker.walk` cancels pending probes, a
   transaction rolls back. Code that catches them re-raises them or decides
   the exit status (`cli.main`, `daemon.run`). The daemon's overrun timer is
-  not one of them: `interrupts.call_after` calls a function when the time
-  passes and interrupts nothing, so an overrun is logged and the cycle
-  finishes.
+  not one of them: `interrupts.call_after` calls a function from a timer
+  thread when the time passes and interrupts nothing, so an overrun is
+  logged and the cycle finishes. No code uses SIGALRM: a handler would run in
+  the middle of a log write, and a ctypes call such as openat2 would fail
+  with EINTR.
 - `walk_within` alone enforces the depth limit: no directory at max depth is
   listed whatever a `should_list` says, so predicates need not repeat it.
 - Database errors are `db.DbError` subclasses (psycopg errors are wrapped);

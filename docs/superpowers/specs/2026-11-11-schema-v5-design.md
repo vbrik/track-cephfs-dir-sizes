@@ -313,7 +313,9 @@ The new rule:
 - The log line of a finished cycle says by how much it overran.
 
 As implemented: the timer is `interrupts.call_after`, which calls the logging
-function and interrupts nothing; whether a cycle overran is read from the
+function from a timer thread and interrupts nothing (a SIGALRM handler, the
+first version, could lose the line during a blocked log write and make a
+ctypes openat2 call fail with EINTR); whether a cycle overran is read from the
 clock when it finishes.
 
 Status 1 remains for a `FatalError` and a bug. A probe stuck on an
