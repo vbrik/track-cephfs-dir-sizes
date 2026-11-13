@@ -1,6 +1,6 @@
 # Restricted own growth for `db summary` — Implementation Plan
 
-> **Do not execute as written (2026-11-11).** This plan targets schema version 4. Version 5 (`docs/superpowers/specs/2026-11-11-schema-v5-design.md`) names paths by id and stores each row's previous rstats, so a window's start states are in the window's rows and `_START_ENDS` is no longer needed. Revise the plan for version 5 first.
+> **Superseded by `2026-11-12-growth-windows.md` (2026-11-12).** This plan targets schema version 4 and is kept as history; do not execute it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

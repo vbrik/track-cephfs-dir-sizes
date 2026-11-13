@@ -4,7 +4,8 @@ Date: 2026-11-11. Status: the decisions in section 2 were agreed in
 discussion on 2026-11-11. Implemented: sections 4, 5 and 8 (2026-11-12, plan
 `2026-11-11-schema-v5`) and section 7 (2026-11-12, plan
 `2026-11-12-tree-names`) and section 6 (2026-11-12, plan
-`2026-11-12-overrun-rule`).
+`2026-11-12-overrun-rule`). `db summary`'s growth (section 5) was reworked
+by plan `2026-11-12-growth-windows` (2026-11-13).
 
 ## 1. Goal and scope
 
@@ -145,6 +146,26 @@ three or four) would reduce it and is the first thing to try if large samples
 ever become slow. The foreign keys stay, including those of
 `current_dir_state`. A run with 10 million directories was not made, so the
 figures for that size remain the projections above.
+
+**Growth windows, 2026-11-13** (plan `2026-11-12-growth-windows`), on the four
+replayed capture series of 10 samples each (trees of 72,041, 10,628, 854,883
+and 2,998 directories), local NVMe, cached:
+
+| `db summary` | Before (2026-11-12) | After |
+|---|---|---|
+| all trees, default windows | 4.82 s, 593 MB | 0.17 s, 44 MB |
+| `--top 0` (no growth) | 0.15 s, 43 MB | 0.16 s, 44 MB |
+| `--tree` the 855k tree | 4.36 s, 588 MB | 0.16 s, 44 MB |
+| `--tree` the 855k tree `--since 30d` (all history) | | 0.16 s, 45 MB |
+
+Growth now costs about what the rest of the summary costs. On the 855k tree a
+window read 889 to 948 paths, of 854,883; `_WINDOW_ROWS` ran in 3 ms, through
+the BRIN index on `dir_state.sample_id`, then the primary keys of `path` and
+`current_dir_state`. For all 36 possible start samples of the four trees the
+result equals `own_growth` over every path. The planner estimates one row for
+a window (the sample id list and range together are not in its statistics),
+so it always joins by nested loop; that is linear in the window's rows, one
+index lookup each, which suits long windows too.
 
 ## 4. Schema version 5
 
@@ -297,11 +318,14 @@ version-5 DDL without a version bump, as nothing was in production yet.
 `docs/schema.md` gives the statements.
 
 **`db summary`** prints what it prints today, plus each tree's name. Counts come from `sample`;
-ROOT's history from the primary key; current errors from the partial index;
-growth reads `current_dir_state` and the earlier rows of changed paths as
-today. The plan of 2026-11-05 (restricted own growth) was written against
-version 4 and must be revised: with `prev_*`, a window's start states are in
-the window's rows.
+ROOT's history from the primary key; current errors from the partial index.
+Amended 2026-11-13 (plan `2026-11-12-growth-windows`): growth is shown over
+time windows (`--since`, default 1d and 7d) that end at the tree's latest
+sample, in place of "since the first sample" and "since the second-to-last".
+Each window reads the rows stored in it, which give each path's state at its
+start (`created`, `prev_rbytes`, `prev_error_stage`), the tree's current
+directories without rstats, and the current rows of the paths these name and
+of their ancestors, not the tree's whole current state.
 
 ## 6. The daemon's overrun rule
 
