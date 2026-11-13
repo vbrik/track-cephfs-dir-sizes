@@ -23,3 +23,8 @@
   `ANALYZE`, then load a second and time it. A fresh database or a single
   data set hides plans that go quadratic, and a load test with one tree
   proves nothing about a second.
+- Do not log or do real work in a signal handler; use a timer thread. A
+  handler runs in the middle of whatever the main thread is doing (a log
+  write, a blocked syscall), and calls made through ctypes (such as
+  openat2) are not retried when a signal interrupts them, so the signal
+  turns them into failures.
