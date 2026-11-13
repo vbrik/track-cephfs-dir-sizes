@@ -65,19 +65,25 @@ class DaemonConfig:
     trees: tuple[TreeConfig, ...]  # sampled in this order
 
 
-def parse_interval(text: str) -> Interval:
-    """Return the Interval TEXT (e.g. "6h") denotes; raises ValueError."""
+def duration_seconds(text: str, what: str, max_days: int | None) -> int:
+    """Return the seconds TEXT (e.g. "6h") denotes, at most MAX_DAYS days if
+    given; raises ValueError, naming the value WHAT."""
     match = _INTERVAL.fullmatch(text)
     if match is None:
         raise ValueError(
-            "interval must be <integer><unit> with unit s, m, h or d, "
+            f"{what} must be <integer><unit> with unit s, m, h or d, "
             f'e.g. "6h": {text!r}'
         )
     number, unit = match.groups()
     seconds = int(number) * _UNIT_SECONDS[unit]
-    if seconds > MAX_INTERVAL_DAYS * _UNIT_SECONDS["d"]:
-        raise ValueError(f"interval must be at most {MAX_INTERVAL_DAYS}d: {text!r}")
-    return Interval(seconds, text)
+    if max_days is not None and seconds > max_days * _UNIT_SECONDS["d"]:
+        raise ValueError(f"{what} must be at most {max_days}d: {text!r}")
+    return seconds
+
+
+def parse_interval(text: str) -> Interval:
+    """Return the Interval TEXT (e.g. "6h") denotes; raises ValueError."""
+    return Interval(duration_seconds(text, "interval", MAX_INTERVAL_DAYS), text)
 
 
 def load(path: Path) -> DaemonConfig:

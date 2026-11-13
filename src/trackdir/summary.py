@@ -17,6 +17,7 @@ from trackdir.db import (
     summarize,
 )
 from trackdir.dbcli import DB_UNCHANGED, database, display_path, tree_identity, utc
+from trackdir.growth import Window
 from trackdir.messages import FatalError, describe_errors
 from trackdir.model import fs_absolute
 
@@ -42,13 +43,15 @@ _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
 )
 
 
-def run_summary(dsn: str, tree: str | None, recent: int, top: int) -> DbStats:
+def run_summary(
+    dsn: str, tree: str | None, recent: int, top: int, since: Sequence[Window]
+) -> DbStats:
     """Return the statistics of DSN's database; see db.summarize.
 
     Raises FatalError, also if no tree is named TREE.
     """
     with database(dsn, DB_UNCHANGED) as conn:
-        stats = summarize(conn, tree, recent, top)
+        stats = summarize(conn, tree, recent, top, since)
     if tree is not None and not stats.tree_stats:
         raise FatalError(
             f"the database has no tree {tree}. Run trackdir db summary without "
@@ -123,7 +126,11 @@ def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
     and its total growth; directories show as absolute paths in tree KEY's
     filesystem.
     """
-    heading = f"  grew most since sample {growth.since}, by own growth:"
+    window = growth.window + (" (all history)" if growth.clipped else "")
+    heading = (
+        f"  grew most in {window}, since sample {growth.since}"
+        f" ({_moment(growth.since_started)}), by own growth:"
+    )
     if not growth.dirs:
         return [f"{heading} none"]
     rows = []

@@ -4,7 +4,14 @@ from pathlib import Path
 import pytest
 
 from trackdir import live
-from trackdir.config import DaemonConfig, Interval, TreeConfig, load, parse_interval
+from trackdir.config import (
+    DaemonConfig,
+    Interval,
+    TreeConfig,
+    duration_seconds,
+    load,
+    parse_interval,
+)
 from trackdir.messages import FatalError
 from trackdir.model import MAX_DEPTH_LIMIT, MAX_DIRS_LIMIT
 
@@ -64,6 +71,29 @@ def test_parse_interval_caps_at_a_year():
     for text in ("366d", "99999999999d"):
         with pytest.raises(ValueError, match="at most 365d"):
             parse_interval(text)
+
+
+def test_duration_seconds_has_no_bound_without_max_days():
+    assert duration_seconds("3650d", "a duration", None) == 3650 * 86_400
+    assert duration_seconds("90m", "a duration", None) == 5400
+
+
+def test_duration_seconds_names_what_it_parses():
+    with pytest.raises(ValueError, match=r"^a duration must be <integer><unit>"):
+        duration_seconds("1w", "a duration", None)
+    with pytest.raises(ValueError, match=r"^a duration must be at most 7d: '8d'"):
+        duration_seconds("8d", "a duration", 7)
+
+
+def test_parse_interval_messages_are_unchanged():
+    with pytest.raises(ValueError) as bad:
+        parse_interval("6")
+    assert str(bad.value) == (
+        "interval must be <integer><unit> with unit s, m, h or d, e.g. \"6h\": '6'"
+    )
+    with pytest.raises(ValueError) as long:
+        parse_interval("366d")
+    assert str(long.value) == "interval must be at most 365d: '366d'"
 
 
 def test_load_minimal(tmp_path):

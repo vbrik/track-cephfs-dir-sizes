@@ -13,7 +13,9 @@ from pathlib import Path
 from trackdir import __version__, daemon, dbcli, sample, summary
 from trackdir.anonymize import AnonymizationError, anonymize, key_recipe, load_key
 from trackdir.capture import CaptureHeader, CaptureWriter
+from trackdir.config import duration_seconds
 from trackdir.db import TREE_NAME_RULE, valid_tree_name
+from trackdir.growth import DEFAULT_WINDOWS, Window
 from trackdir.interrupts import Terminated, terminate_on_signals
 from trackdir.live import (
     DEFAULT_JOBS,
@@ -155,8 +157,9 @@ DB_SUMMARY_DESCRIPTION = f"""\
 Report what the database given by --db or {dbcli.DSN_ENV} holds: totals, then
 for each tree its samples, its current directories and errors, ROOT's size and
 its change since the first sample, the newest samples with what each stored,
-and the directories, at any depth, with the most own growth since the first
-sample and since the second-to-last. Read-only; the report goes to stdout.
+and the directories, at any depth, with the most own growth in each window
+given by --since (default: the last day and the last week). Read-only; the
+report goes to stdout.
 """
 
 DB_SUMMARY_EPILOG = f"""\
@@ -165,21 +168,26 @@ incremental. A directory a sample stored is new if it had no current row
 before the sample, else modified; deleted counts its tombstones. Telling them
 apart reads every stored row of the trees reported.
 
-Growth since the first sample needs 2 samples, since the second-to-last 3;
-both windows end at the latest sample. A directory's growth is that of its
-rbytes; its own growth is that minus the growth of its subdirectories: the
-growth of the files directly in it. Own growths add up to ROOT's growth, so
-none is counted twice; "share" is a directory's part of all positive own
-growth. A directory at max depth owns the growth of its whole subtree, which
-is not stored. Below a directory unlisted at either end (an error other than
-rstats), the subtree was not read then, so growth there is unknown; so is
-the growth of a directory without rstats at either end. The nearest ancestor
-with a known growth owns an unknown growth. Directories that own growth of
-subdirectories are marked (subtree): it is somewhere below them. Growth
-spread over many subdirectories, each growing a little, makes none of them
-rank, and does not rank their parent either. CephFS propagates rstats upward
-with a delay, so within a window a directory's own growth can be off by its
-children's latest changes.
+A window of --since D ends at the tree's latest sample and starts at the
+latest sample at least D before it; a tree with a shorter history is shown
+from its first sample, marked (all history). A window needs 2 samples.
+Growth reads the rows stored in each window, so a long window over a long
+history takes longer.
+
+A directory's growth is that of its rbytes; its own growth is that minus the
+growth of its subdirectories: the growth of the files directly in it. Own
+growths add up to ROOT's growth, so none is counted twice; "share" is a
+directory's part of all positive own growth. A directory at max depth owns
+the growth of its whole subtree, which is not stored. Below a directory
+unlisted at either end (an error other than rstats), the subtree was not
+read then, so growth there is unknown; so is the growth of a directory
+without rstats at either end. The nearest ancestor with a known growth owns
+an unknown growth. Directories that own growth of subdirectories are marked
+(subtree): it is somewhere below them. Growth spread over many
+subdirectories, each growing a little, makes none of them rank, and does not
+rank their parent either. CephFS propagates rstats upward with a delay, so
+within a window a directory's own growth can be off by its children's latest
+changes.
 
 A directory new in a window grows from 0 and is marked (new). A directory
 gone by the end, or with an unknown growth, is left out. --top 0 skips
@@ -355,7 +363,8 @@ def _prepare_db_summary(args: argparse.Namespace) -> _Command:
     render = summary.render_json if args.json else summary.render_text
 
     def run() -> str:
-        stats = summary.run_summary(dsn, args.tree, args.samples, args.top)
+        since = args.since or DEFAULT_WINDOWS
+        stats = summary.run_summary(dsn, args.tree, args.samples, args.top, since)
         sys.stdout.write(render(stats))
         return ""
 
@@ -457,6 +466,14 @@ def _tree_name(text: str) -> str:
     if not valid_tree_name(text):
         raise argparse.ArgumentTypeError(f"a tree name is {TREE_NAME_RULE}: {text!r}")
     return text
+
+
+def _window(text: str) -> Window:
+    """Return the growth window TEXT (e.g. "7d") gives; raises ArgumentTypeError."""
+    try:
+        return Window(text, duration_seconds(text, "a duration", None))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def _int_between(minimum: int, maximum: int | None = None) -> Callable[[str], int]:
@@ -599,6 +616,14 @@ def _parser() -> argparse.ArgumentParser:
         default=3,
         metavar="N",
         help="list the N directories with the most own growth (default: %(default)s)",
+    )
+    summarize.add_argument(
+        "--since",
+        type=_window,
+        action="append",
+        metavar="DURATION",
+        help="show growth in the DURATION (e.g. 6h, 7d) up to each tree's latest"
+        " sample; repeatable (default: 1d and 7d)",
     )
     summarize.add_argument(
         "--json", action="store_true", help="print JSON instead of text"

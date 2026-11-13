@@ -15,6 +15,7 @@ import pytest
 from conftest import SUBTREE, collapse, edited_capture, later, replay
 
 from trackdir import sample
+from trackdir import summary as summary_module
 from trackdir.capture import Capture, load_capture, write_capture
 from trackdir.cli import main
 from trackdir.db import (
@@ -738,12 +739,14 @@ def test_render_text():
         "       7  incremental  2026-10-16T20:48:11Z  13.2 s     962    1        17"
         "        2      41  1000  live\n"
         "  1 older sample not shown\n"
-        "  grew most since sample 5, by own growth:\n"
+        "  grew most in 7d (all history), since sample 5 (2026-10-15T20:48:11Z),"
+        " by own growth:\n"
         "           own  share       total  directory\n"
         "    +512.0 GiB    50%  +512.0 GiB  /proj/sub/alpha/x (subtree)\n"
         "      +1.0 GiB    <1%    +3.0 GiB  /proj/sub/beta (new)\n"
         "      +1.0 MiB    <1%  +512.0 GiB  /proj/sub\n"
-        "  grew most since sample 6, by own growth: none\n"
+        "  grew most in 1h, since sample 6 (2026-10-16T19:48:11Z), by own growth:"
+        " none\n"
     )
 
 
@@ -907,7 +910,7 @@ def test_cli_top_selects_growth(initial, dsn, subtree, tmp_path, capsys):
     replay(dsn, edit(subtree, tmp_path, "second", 1, touch=touched), max_depth=DEPTH)
     assert main(["db", "summary", "--db", dsn, "--top", "4"]) == 0
     stdout = capsys.readouterr().out
-    assert "  grew most since sample 1, by own growth:\n" in stdout
+    assert "  grew most in 1d (all history), since sample 1 (" in stdout
     fs_path = os.fsencode(subtree.header.fs_path)
     for path in touched:
         shown = os.fsdecode(fs_absolute(fs_path, path))
@@ -928,6 +931,74 @@ def test_cli_usage_errors(args, capsys):
     with pytest.raises(SystemExit) as exc:
         main(["db", "summary", "--db", "x", *args])
     assert exc.value.code == 2
+
+
+def test_text_heading_of_a_window():
+    growth = Growth("1d", 12, T1, False, 0, ())
+    text = render_text(stats_of(growth=(growth,)))
+    assert (
+        "\n  grew most in 1d, since sample 12 (2026-10-16T20:48:11Z), by own"
+        " growth: none\n"
+    ) in text
+
+
+def test_text_heading_of_a_clipped_window():
+    growth = Growth("30d", 1, T1, True, 1, (DirGrowth(b"x", 1, 2, 1, False),))
+    text = render_text(stats_of(growth=(growth,)))
+    assert (
+        "\n  grew most in 30d (all history), since sample 1"
+        " (2026-10-16T20:48:11Z), by own growth:\n"
+    ) in text
+
+
+def test_json_growth_has_window_fields():
+    (tree,) = json.loads(render_json(stats_of()))["trees"]
+    week, hour = tree["growth"]
+    assert {k: week[k] for k in ("window", "since", "since_started", "clipped")} == {
+        "window": "7d",
+        "since": 5,
+        "since_started": "2026-10-15T20:48:11.500000+00:00",
+        "clipped": True,
+    }
+    assert (hour["window"], hour["clipped"]) == ("1h", False)
+
+
+def test_since_is_repeatable_and_defaults_to_1d_and_7d(monkeypatch):
+    calls = []
+
+    def run_summary(dsn, tree, recent, top, since):
+        calls.append(tuple(since))
+        return DbStats(5, 0, 0, 0, 0, ())
+
+    monkeypatch.setattr(summary_module, "run_summary", run_summary)
+    assert main(["db", "summary", "--db", "x"]) == 0
+    assert main(["db", "summary", "--db", "x", "--since", "6h", "--since", "30d"]) == 0
+    assert calls == [
+        (Window("1d", 86_400), Window("7d", 604_800)),
+        (Window("6h", 21_600), Window("30d", 30 * 86_400)),
+    ]
+
+
+@pytest.mark.parametrize("text", ["7", "0d", "1w", "1.5d"])
+def test_since_rejects_bad_durations(text, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["db", "summary", "--db", "x", "--since", text])
+    assert exc.value.code == 2
+    assert "a duration must be <integer><unit>" in capsys.readouterr().err
+
+
+def test_cli_since_selects_windows(initial, dsn, subtree, tmp_path, capsys):
+    a = at_depth(subtree, 1)[0]
+    replay(dsn, edit(subtree, tmp_path, "second", 1, touch=[a]), max_depth=DEPTH)
+    args = ["db", "summary", "--db", dsn, "--since", "30m", "--since", "2h"]
+    assert main(args) == 0
+    headings = [
+        line for line in capsys.readouterr().out.splitlines() if "grew most" in line
+    ]
+    assert [h.split(",")[0] for h in headings] == [
+        "  grew most in 30m",
+        "  grew most in 2h (all history)",
+    ]
 
 
 def test_render_text_has_no_change_while_root_has_one_row():

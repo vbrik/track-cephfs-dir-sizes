@@ -160,19 +160,20 @@ sample between cycles.
 
     trackdir db summary                  # every tree, its 10 newest samples
     trackdir db summary --tree projects --top 10
+    trackdir db summary --since 6h --since 30d   # growth windows (default: 1d, 7d)
     trackdir db summary --json | jq '.trees[] | {name, current_dirs}'
 
-Example (placeholders):
+Example of `trackdir db summary --since 7d` (placeholders):
 
     Tree projects (cluster 1111…, default filesystem, path /proj/sub, depth 4)
-      samples: 2, 2026-10-16T20:48:11Z to 2026-10-16T20:48:30Z
+      samples: 2, 2026-10-09T20:48:11Z to 2026-10-16T20:48:30Z
       current: 72017 directories; 41 had errors: open EACCES 41
       ROOT:    1.2 PiB, 412345678 files, 5123456 directories, last changed in sample 2
       change:  +20.5 GiB, +1234 files, -3 directories since sample 1
       sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
-           1  initial      2026-10-16T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
-      grew most since sample 1, by own growth:
+           1  initial      2026-10-09T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
+      grew most in 7d, since sample 1 (2026-10-09T20:48:11Z), by own growth:
                own  share       total  directory
          +12.0 GiB    58%   +12.0 GiB  /proj/sub/proj-a/run/2026/raw (subtree)
           +8.1 GiB    39%    +8.5 GiB  /proj/sub/proj-b
@@ -182,7 +183,9 @@ A directory's own growth is that of the files directly in it, not of its
 subdirectories, so the list points at where the growth is, at any depth.
 A directory at max depth, or above a part of the tree that could not be
 read, owns the growth below it and is marked (subtree). Growth spread
-thinly over many directories does not stand out.
+thinly over many directories does not stand out. A window starts at the
+latest sample at least its duration before the tree's latest; a tree with a
+shorter history is shown from its first sample, marked (all history).
 
 ## Capture directory state
 
