@@ -680,6 +680,36 @@ def test_error_row_gives_unknown_previous_values_but_not_created(db):
     ]
 
 
+def test_prev_error_stage_is_the_stage_the_row_replaced(db):
+    init_schema(db)
+    unlisted = DirProbe(b"a", rbytes=3, error=ProbeError(Stage.READDIR, "EACCES"))
+    unreadable = DirProbe(b"b", error=ProbeError(Stage.OPEN, "EACCES"))
+    root = DirProbe(ROOT, rbytes=5, children=(b"a", b"b"))
+    store(db, HEADER, [root, unlisted, DirProbe(b"b", rbytes=2)])
+    store(db, later(HEADER, 60), [replace(root, rbytes=4), dirs(a=3)[1], unreadable])
+    store(db, later(HEADER, 120), [DirProbe(ROOT, rbytes=3, children=(b"a",))])
+    assert history(db, b"a", "created", "error_stage", "prev_error_stage") == [
+        (True, "readdir", None),
+        (False, None, "readdir"),
+    ]
+    assert history(db, b"b", "created", "deleted", "prev_error_stage") == [
+        (True, False, None),
+        (False, False, None),
+        (False, True, "open"),  # a tombstone carries the last known stage
+    ]
+    assert_invariants(db)
+
+
+def test_partial_index_finds_current_rows_without_rbytes(db):
+    init_schema(db)
+    db.execute("SET enable_seqscan = off")
+    plan = db.execute(
+        "EXPLAIN SELECT path_id FROM trackdir.current_dir_state"
+        " WHERE tree_id = 1 AND rbytes IS NULL"
+    ).fetchall()
+    assert "current_dir_state_errors" in "".join(line for (line,) in plan)
+
+
 def test_trees_with_the_same_relative_path_are_separate(db):
     init_schema(db)
     other = replace(HEADER, fs_path="/y")

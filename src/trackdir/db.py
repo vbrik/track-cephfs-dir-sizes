@@ -54,8 +54,9 @@ SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
 #
 # Three things repeat what dir_state's history says, so that no reader has to
 # sort it: current_dir_state is each live path's latest row (a tombstone removes
-# the row); a row's prev_* are the rstats of its path's row before the sample
-# (NULL without one, or without rstats there); created says there was none;
+# the row); a row's prev_* are the rstats and error stage of its path's row
+# before the sample (NULL without one, or without them there); created says
+# there was none;
 # a sample's new_dirs, modified_dirs and deleted_dirs count its rows.
 # store_sample alone derives them, in the transaction that stores the rows.
 DDL = """\
@@ -129,6 +130,7 @@ CREATE TABLE trackdir.dir_state (
     prev_rbytes   bigint,            -- the path's rstats before the sample
     prev_rfiles   bigint,
     prev_rsubdirs bigint,
+    prev_error_stage text CHECK (prev_error_stage IN ('open', 'stat', 'rstats', 'readdir')),
     PRIMARY KEY (path_id, sample_id),
     CHECK ((error_stage IS NULL) = (error_code IS NULL)),
     CHECK (NOT (created AND deleted)),
@@ -158,8 +160,10 @@ CREATE TABLE trackdir.current_dir_state (
     error_code  text,
     PRIMARY KEY (tree_id, path_id)
 );
+-- Finds a tree's current errors, and its directories without rstats, whose
+-- growth is unknown.
 CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
-    WHERE error_stage IS NOT NULL;
+    WHERE error_stage IS NOT NULL OR rbytes IS NULL;
 
 -- store_sample joins path and current_dir_state by tree, and summarize joins
 -- dir_state by sample. By default autovacuum refreshes a table's statistics
@@ -713,9 +717,10 @@ WHERE NOT EXISTS (
 # Returns the sample's counts of new, modified and deleted rows.
 _INSERT_STATES = f"""WITH stored AS (
     INSERT INTO trackdir.dir_state (path_id, sample_id, {", ".join(ROW_COLUMNS)},
-        created, deleted, prev_rbytes, prev_rfiles, prev_rsubdirs)
+        created, deleted, prev_rbytes, prev_rfiles, prev_rsubdirs,
+        prev_error_stage)
     SELECT p.id, %(sample)s, {_STAGED}, c.path_id IS NULL, s.deleted,
-           c.rbytes, c.rfiles, c.rsubdirs
+           c.rbytes, c.rfiles, c.rsubdirs, c.error_stage
     FROM {_STAGE_PATHS}
     LEFT JOIN trackdir.current_dir_state c
            ON c.tree_id = %(tree)s AND c.path_id = p.id

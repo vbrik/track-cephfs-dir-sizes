@@ -30,7 +30,9 @@ version 5 on, every change ships an upgrade step (see
 - **Each row says what it replaced.** `prev_rbytes`, `prev_rfiles` and
   `prev_rsubdirs` are the directory's rstats before the sample, so the change
   over a window of samples is its last row's value minus its first row's
-  `prev_` value: no row outside the window is needed. `created` tells a
+  `prev_` value: no row outside the window is needed. `prev_error_stage` says
+  whether the directory was listed before the sample, which decides whether
+  growth below it is known at the window's start. `created` tells a
   directory that did not exist before from one whose earlier rstats are
   unknown; both have NULL `prev_` values.
 - **A tree's samples are ordered by `(started, id)`**; the latest has the
@@ -126,6 +128,7 @@ rows of a window of samples.
 | `created` | boolean | The directory had no current row before the sample: it is new, or was deleted earlier. Never true for a tombstone. |
 | `deleted` | boolean | A tombstone: the directory is gone as of this sample. Every column from `ino` to `error_code` is NULL. |
 | `prev_rbytes`, `prev_rfiles`, `prev_rsubdirs` | bigint | The directory's `rbytes`, `rfiles` and `rsubdirs` in its current row before the sample; NULL if it had none (`created`) or that row had no rstats. A tombstone carries the last known values, so it says how much was deleted. |
+| `prev_error_stage` | text | The `error_stage` of its current row before the sample; NULL if it had none (`created`) or that row had no error. A tombstone carries the last known value. |
 
 A value that could not be read is NULL, and the error columns say why: `open`
 and `stat` errors usually leave everything NULL (an `open` EACCES keeps the
@@ -152,8 +155,9 @@ stores a sample; it holds nothing that `dir_state` does not.
 | `sample_id` | bigint | The sample that stored this state: the latest in which the directory changed. |
 | `ino` to `error_code` | | As in `dir_state`. |
 
-An index on `tree_id` restricted to rows with an error finds a tree's
-current errors without reading the tree.
+An index on `tree_id` restricted to rows with an error or without `rbytes`
+finds a tree's current errors, and its directories whose growth is unknown,
+without reading the tree.
 
 ### Planner statistics
 

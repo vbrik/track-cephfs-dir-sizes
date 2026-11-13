@@ -314,10 +314,12 @@ SELECT count(*) FROM (
 """
 _BROKEN_CHAIN = """SELECT count(*) FROM (
     SELECT d.created, d.prev_rbytes, d.prev_rfiles, d.prev_rsubdirs,
+           d.prev_error_stage,
            lag(d.deleted) OVER w AS was_deleted,
            lag(d.rbytes) OVER w AS was_rbytes,
            lag(d.rfiles) OVER w AS was_rfiles,
-           lag(d.rsubdirs) OVER w AS was_rsubdirs
+           lag(d.rsubdirs) OVER w AS was_rsubdirs,
+           lag(d.error_stage) OVER w AS was_stage
     FROM trackdir.dir_state d JOIN trackdir.sample s ON s.id = d.sample_id
     WINDOW w AS (PARTITION BY d.path_id ORDER BY s.started, s.id)
 ) history
@@ -325,6 +327,7 @@ WHERE created IS DISTINCT FROM coalesce(was_deleted, true)
    OR prev_rbytes IS DISTINCT FROM was_rbytes
    OR prev_rfiles IS DISTINCT FROM was_rfiles
    OR prev_rsubdirs IS DISTINCT FROM was_rsubdirs
+   OR prev_error_stage IS DISTINCT FROM was_stage
 """
 
 
@@ -342,9 +345,9 @@ def assert_invariants(conn) -> None:
     """Check what store_sample derives from dir_state against a rebuild.
 
     current_dir_state is each path's latest row unless that is a tombstone;
-    a row's prev_* are its path's previous row's rstats, and it is created
-    exactly if there is none or it is a tombstone; a sample's new_dirs,
-    modified_dirs and deleted_dirs count its rows.
+    a row's prev_* are its path's previous row's rstats and error stage, and
+    it is created exactly if there is none or it is a tombstone; a sample's
+    new_dirs, modified_dirs and deleted_dirs count its rows.
     """
     from trackdir.baseline import ROW_COLUMNS
 

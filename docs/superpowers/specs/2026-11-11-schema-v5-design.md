@@ -217,6 +217,9 @@ Why each piece:
   the size of what was deleted is in the row. Growth over a window is the
   window's last row minus its first row's `prev_*`: no read outside the
   window. `created` tells "grew from nothing" from "unknown before".
+  `prev_error_stage` (added 2026-11-12, plan `2026-11-12-growth-windows`)
+  holds the error stage of that row likewise, so whether a directory was
+  listed at a window's start is in the window's rows too.
 - **`current_dir_state`** holds live directories only: a tombstone deletes
   the row. It carries the path bytes so that loading a baseline never touches
   `path`, which grows with every short-lived directory. It is the only table
