@@ -158,6 +158,12 @@ def test_window_start(hours_ago, seconds, expected):
     assert window_start(started, seconds) == expected
 
 
+@pytest.mark.parametrize("seconds", [800_000 * 86_400, 99_999_999_999_999 * 86_400])
+def test_window_longer_than_the_calendar_is_all_history(seconds):
+    started = [LATEST - timedelta(hours=1), LATEST]
+    assert window_start(started, seconds) == (0, True)
+
+
 # The paths a window's growth depends on
 
 

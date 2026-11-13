@@ -987,6 +987,16 @@ def test_since_rejects_bad_durations(text, capsys):
     assert "a duration must be <integer><unit>" in capsys.readouterr().err
 
 
+def test_cli_since_beyond_the_calendar_shows_all_history(
+    initial, dsn, subtree, tmp_path, capsys
+):
+    replay(dsn, edit(subtree, tmp_path, "second", 1), max_depth=DEPTH)
+    assert main(["db", "summary", "--db", dsn, "--since", "800000d"]) == 0
+    assert "  grew most in 800000d (all history), since sample 1 (" in (
+        capsys.readouterr().out
+    )
+
+
 def test_cli_since_selects_windows(initial, dsn, subtree, tmp_path, capsys):
     a = at_depth(subtree, 1)[0]
     replay(dsn, edit(subtree, tmp_path, "second", 1, touch=[a]), max_depth=DEPTH)

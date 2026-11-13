@@ -121,7 +121,11 @@ def window_start(started: Sequence[datetime], seconds: int) -> tuple[int, bool] 
     """
     if len(started) < 2:
         return None
-    index = bisect_right(started, started[-1] - timedelta(seconds=seconds)) - 1
+    try:
+        start = started[-1] - timedelta(seconds=seconds)
+    except OverflowError:  # before the year 1: before the first sample too
+        return 0, True
+    index = bisect_right(started, start) - 1
     return (0, True) if index < 0 else (index, False)
 
 
