@@ -1,9 +1,18 @@
-"""Own growth of directories between two states of a tree; pure: no database."""
+"""Own growth of directories between two states of a tree; pure: no database.
+
+A growth window runs from one sample of a tree to its latest. Its growth
+depends on few of the tree's paths: those stored in the window, those without
+rstats now, a witness below each directory listed again in the window, and
+their ancestors (see docs/superpowers/plans/2026-11-12-growth-windows.md,
+"Design"). The functions below choose them; the database reads them.
+"""
 
 import heapq
+from bisect import bisect_right
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from trackdir.model import ROOT, UNLISTING_STAGES, path_depth, split
 
@@ -89,3 +98,81 @@ def own_growth(
         owned.append(DirGrowth(path, before, now[0], growth - below[path], subtree))
     positive = sum(d.own for d in owned)
     return positive, tuple(heapq.nsmallest(top, owned, key=lambda d: (-d.own, d.path)))
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """A growth window's length: the text it was given as, and its seconds."""
+
+    text: str  # e.g. "7d"
+    seconds: int
+
+
+DEFAULT_WINDOWS = (Window("1d", 86_400), Window("7d", 604_800))
+
+
+def window_start(started: Sequence[datetime], seconds: int) -> tuple[int, bool] | None:
+    """Return where a window of SECONDS starts, and whether it is clipped.
+
+    STARTED are a tree's samples' start times, oldest first. The window ends at
+    the last and starts at the latest sample that started at least SECONDS
+    before it; if none did, it starts at the first and is clipped: the tree's
+    history is shorter. None with fewer than 2 samples.
+    """
+    if len(started) < 2:
+        return None
+    index = bisect_right(started, started[-1] - timedelta(seconds=seconds)) - 1
+    return (0, True) if index < 0 else (index, False)
+
+
+def witness_dirs(changed: Mapping[bytes, tuple[End, End]]) -> list[bytes]:
+    """Return the paths of CHANGED that need a witness, sorted.
+
+    CHANGED maps the paths stored in a window to their two ends. A directory
+    unlisted at the start but not at the end, with rbytes at both, owns the
+    unknown growth of the paths below it, which need not be stored in the
+    window: one current path below it, any, gives it that mark.
+    """
+    return sorted(
+        path
+        for path, (start, end) in changed.items()
+        if start is not None
+        and end is not None
+        and start[1] in UNLISTING_STAGES
+        and end[1] not in UNLISTING_STAGES
+        and start[0] is not None
+        and end[0] is not None
+    )
+
+
+def kept_paths(seeds: Iterable[bytes]) -> set[bytes]:
+    """Return SEEDS and all their ancestors, ROOT included."""
+    kept: set[bytes] = set()
+    for path in seeds:
+        while path not in kept:
+            kept.add(path)
+            if path == ROOT:
+                break
+            path = split(path)[0]
+    return kept
+
+
+def window_ends(
+    changed: Mapping[bytes, tuple[End, End]],
+    current: Mapping[bytes, End],
+    kept: Iterable[bytes],
+) -> dict[bytes, tuple[End, End]]:
+    """Return own_growth's ENDS for the KEPT paths.
+
+    A path in CHANGED has its ends there; any other is unchanged, at its state
+    in CURRENT at both. A path absent at both ends is left out, as is one in
+    neither mapping.
+    """
+    ends: dict[bytes, tuple[End, End]] = {}
+    for path in kept:
+        if path in changed:
+            if changed[path] != (None, None):
+                ends[path] = changed[path]
+        elif path in current:
+            ends[path] = (current[path], current[path])
+    return ends
