@@ -4,8 +4,9 @@ import json
 import os
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
+from typing import TextIO
 
 from trackdir.db import (
     DbStats,
@@ -44,6 +45,38 @@ _SAMPLE_COLUMNS = (  # (header, right-aligned) of the sample table
 )
 
 
+@dataclass(frozen=True)
+class _Style:
+    """Wraps text in ANSI SGR codes if COLOR, else returns it unchanged.
+
+    Spans never nest, as each ends by resetting every attribute.
+    """
+
+    color: bool
+
+    def bold(self, text: str) -> str:
+        return self._sgr("1", text)
+
+    def dim(self, text: str) -> str:
+        return self._sgr("2", text)
+
+    def warn(self, text: str) -> str:
+        return self._sgr("33", text)  # yellow
+
+    def _sgr(self, code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if self.color else text
+
+
+class _Warning(str):
+    """A table cell shown in the warning style."""
+
+
+def color_wanted(stream: TextIO) -> bool:
+    """Return whether text for STREAM should be colored: it is a terminal and
+    NO_COLOR is unset or empty (https://no-color.org)."""
+    return stream.isatty() and not os.environ.get("NO_COLOR")
+
+
 def run_summary(
     dsn: str, tree: str | None, recent: int, top: int, since: Sequence[Window]
 ) -> DbStats:
@@ -61,16 +94,18 @@ def run_summary(
     return stats
 
 
-def render_text(stats: DbStats) -> str:
-    """Return STATS as text: a database line, then a block per tree."""
+def render_text(stats: DbStats, *, color: bool = False) -> str:
+    """Return STATS as text: a database line, then a block per tree; COLOR
+    adds ANSI styles that leave the layout as it is."""
+    style = _Style(color)
     lines = [
-        f"Database: schema version {stats.schema_version}; "
+        f"{style.bold('Database:')} schema version {stats.schema_version}; "
         f"{_count(stats.trees, 'tree')}, {_count(stats.samples, 'sample')}, "
         f"{_count(stats.dir_states, 'dir_state row')}; "
         f"{format_bytes(stats.bytes_on_disk)} on disk"
     ]
     for tree in stats.tree_stats:
-        lines += ["", *_tree_lines(tree)]
+        lines += ["", *_tree_lines(tree, style)]
     return "\n".join(lines) + "\n"
 
 
@@ -122,32 +157,41 @@ def format_count(n: int) -> str:
     return f"{sign}{digits}{_PREFIXES[prefix - 1]}"
 
 
-def _tree_lines(tree: TreeStats) -> list[str]:
-    lines = [f"Tree {tree.name} ({tree_identity(tree.key)})"]
-    samples = f"  samples: {format_count(tree.samples)}"
+def _tree_lines(tree: TreeStats, style: _Style) -> list[str]:
+    """Return a heading, the tree's lines, then its samples and each growth
+    window, each set off by a blank line."""
+    lines = [
+        f"{style.bold(f'Tree {tree.name}')} {style.dim(f'({tree_identity(tree.key)})')}"
+    ]
+    samples = f"  {style.dim('samples:')} {format_count(tree.samples)}"
     if tree.first_started is not None and tree.last_started is not None:
         samples += f", {_moment(tree.first_started)} to {_moment(tree.last_started)}"
     lines.append(samples)
+    errors = describe_errors(tree.current_errors)
     lines.append(
-        f"  current: {_count(tree.current_dirs, 'directory')}; "
-        f"{describe_errors(tree.current_errors)}"
+        f"  {style.dim('current:')} {_count(tree.current_dirs, 'directory')}; "
+        f"{style.warn(errors) if tree.current_errors else errors}"
     )
     lines.append(
-        f"  db space: about {format_bytes(tree.bytes_on_disk_estimate)} on disk"
-        " (estimate)"
+        f"  {style.dim('db space:')} about"
+        f" {format_bytes(tree.bytes_on_disk_estimate)} on disk (estimate)"
     )
-    lines += _root_lines(tree.root_now, tree.root_first)
+    lines += _root_lines(tree.root_now, tree.root_first, style)
+    hidden = tree.samples - len(tree.recent)
+    if tree.recent or hidden:
+        lines.append("")
     if tree.recent:
-        lines += _table(_SAMPLE_COLUMNS, [_sample_row(s) for s in tree.recent])
-    if hidden := tree.samples - len(tree.recent):
+        rows = [_sample_row(s) for s in tree.recent]
+        lines += _table(_SAMPLE_COLUMNS, rows, style)
+    if hidden:
         noun = "older sample" if tree.recent else "sample"
-        lines.append(f"  {_count(hidden, noun)} not shown")
+        lines.append(f"  {style.dim(f'{_count(hidden, noun)} not shown')}")
     for growth in tree.growth:
-        lines += _growth_lines(growth, tree.key)
+        lines += ["", *_growth_lines(growth, tree.key, style)]
     return lines
 
 
-def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
+def _growth_lines(growth: Growth, key: TreeKey, style: _Style) -> list[str]:
     """Return a heading and a table of directories, or one line if none grew.
 
     Each directory shows its own growth, its share of all positive own growth
@@ -155,8 +199,8 @@ def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
     filesystem.
     """
     window = growth.window + (" (all history)" if growth.clipped else "")
-    heading = (
-        f"  grew most in {window}, since sample {growth.since}"
+    heading = "  " + style.bold(
+        f"grew most in {window}, since sample {growth.since}"
         f" ({_moment(growth.since_started)}), by own growth:"
     )
     if not growth.dirs:
@@ -174,7 +218,8 @@ def _growth_lines(growth: Growth, key: TreeKey) -> list[str]:
                 path + (f" ({', '.join(marks)})" if marks else ""),
             ]
         )
-    return [heading, *("  " + line for line in _table(_GROWTH_COLUMNS, rows))]
+    table = _table(_GROWTH_COLUMNS, rows, style)
+    return [heading, *("  " + line for line in table)]
 
 
 def _share(part: int, whole: int) -> str:
@@ -183,16 +228,19 @@ def _share(part: int, whole: int) -> str:
     return f"{percent}%" if percent else "<1%"
 
 
-def _root_lines(now: RootTotals | None, first: RootTotals | None) -> list[str]:
+def _root_lines(
+    now: RootTotals | None, first: RootTotals | None, style: _Style
+) -> list[str]:
+    root = f"  {style.dim('ROOT:')}    "
     if now is None:
-        return ["  ROOT:    no rstats in its current row"]
+        return [f"{root}no rstats in its current row"]
     lines = [
-        f"  ROOT:    {format_bytes(now.rbytes)}, {_count(now.rfiles, 'file')}, "
+        f"{root}{format_bytes(now.rbytes)}, {_count(now.rfiles, 'file')}, "
         f"{_count(now.rsubdirs, 'directory')}, last changed in sample {now.sample_id}"
     ]
     if first is not None and first.sample_id != now.sample_id:
         lines.append(
-            f"  change:  {_signed_bytes(now.rbytes - first.rbytes)}, "
+            f"  {style.dim('change:')}  {_signed_bytes(now.rbytes - first.rbytes)}, "
             f"{_count(now.rfiles - first.rfiles, 'file', signed=True)}, "
             f"{_count(now.rsubdirs - first.rsubdirs, 'directory', signed=True)} "
             f"since sample {first.sample_id}"
@@ -222,30 +270,32 @@ def _sample_row(sample: SampleStats) -> list[str]:
         _moment(sample.started),
         f"{took:.1f} s",
         *map(
-            format_count,
-            (sample.probed, sample.new, sample.modified, sample.deleted, sample.errors),
+            format_count, (sample.probed, sample.new, sample.modified, sample.deleted)
         ),
+        (_Warning if sample.errors else str)(format_count(sample.errors)),
         str(sample.euid),
         "live" if sample.replayed_from is None else "replay",
     ]
 
 
 def _table(
-    columns: Sequence[tuple[str, bool]], rows: Sequence[Sequence[str]]
+    columns: Sequence[tuple[str, bool]], rows: Sequence[Sequence[str]], style: _Style
 ) -> list[str]:
-    """Return a header and ROWS as indented lines; COLUMNS are (header, right)."""
+    """Return a dim header and ROWS as indented lines; COLUMNS are (header,
+    right). Cells are styled after padding, so styles do not shift columns."""
     header = [name for name, _ in columns]
     aligns = [right for _, right in columns]
     widths = [max(len(row[i]) for row in (header, *rows)) for i in range(len(header))]
 
     def line(cells: Sequence[str]) -> str:
-        padded = (
-            cell.rjust(width) if right else cell.ljust(width)
-            for cell, width, right in zip(cells, widths, aligns, strict=True)
-        )
-        return ("  " + "  ".join(padded)).rstrip()
+        padded = []
+        for cell, width, right in zip(cells, widths, aligns, strict=True):
+            pad = " " * (width - len(cell))
+            text = style.warn(cell) if isinstance(cell, _Warning) else cell
+            padded.append(pad + text if right else text + pad)
+        return "  ".join(padded).rstrip()
 
-    return [line(header), *map(line, rows)]
+    return ["  " + style.dim(line(header)), *("  " + line(row) for row in rows)]
 
 
 def _moment(moment: datetime) -> str:

@@ -171,14 +171,19 @@ Example of `trackdir db summary --since 7d` (placeholders):
       db space: about 52.3 MiB on disk (estimate)
       ROOT:    1.2 PiB, 412M files, 5.12M directories, last changed in sample 2
       change:  +20.5 GiB, +1.23k files, -3 directories since sample 1
+
       sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
            1  initial      2026-10-09T20:48:11Z  13.2 s   72.0k  72.0k         0        0      41  1000  live
+
       grew most in 7d, since sample 1 (2026-10-09T20:48:11Z), by own growth:
                own  share       total  directory
          +12.0 GiB    58%   +12.0 GiB  /proj/sub/proj-a/run/2026/raw (subtree)
           +8.1 GiB    39%    +8.5 GiB  /proj/sub/proj-b
         +409.6 MiB     1%  +409.6 MiB  /proj/sub/proj-b/2025/q4/raw (subtree)
+
+On a terminal the text is colored, errors in yellow; `--no-color` or a
+non-empty `NO_COLOR` turns color off.
 
 A directory's own growth is that of the files directly in it, not of its
 subdirectories, so the list points at where the growth is, at any depth.

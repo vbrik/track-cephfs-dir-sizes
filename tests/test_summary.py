@@ -4,8 +4,11 @@ The database tests replay SUBTREE and edited copies of it at depth 2, which
 keeps them fast; they need TRACKDIR_TEST_DSN (the db fixture) and psycopg.
 """
 
+import io
 import json
 import os
+import re
+import sys
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -40,7 +43,13 @@ from trackdir.model import (
     join,
     split,
 )
-from trackdir.summary import format_bytes, format_count, render_json, render_text
+from trackdir.summary import (
+    color_wanted,
+    format_bytes,
+    format_count,
+    render_json,
+    render_text,
+)
 
 DEPTH = 2  # of most replays; SUBTREE has 380 directories down to it
 # A window longer than any test's history: it starts at the first sample
@@ -806,17 +815,20 @@ def test_render_text():
         "  ROOT:    3.5 TiB, 4.57M files, 72.0k directories, last changed in"
         " sample 7\n"
         "  change:  +512.0 GiB, +890 files, -1 directory since sample 5\n"
+        "\n"
         "  sample  kind         started (UTC)           took  probed  new  modified"
         "  deleted  errors  euid  source\n"
         "       7  incremental  2026-10-16T20:48:11Z  13.2 s     962    1        17"
         "        2      41  1000  live\n"
         "  1 older sample not shown\n"
+        "\n"
         "  grew most in 7d (all history), since sample 5 (2026-10-15T20:48:11Z),"
         " by own growth:\n"
         "           own  share       total  directory\n"
         "    +512.0 GiB    50%  +512.0 GiB  /proj/sub/alpha/x (subtree)\n"
         "      +1.0 GiB    <1%    +3.0 GiB  /proj/sub/beta (new)\n"
         "      +1.0 MiB    <1%  +512.0 GiB  /proj/sub\n"
+        "\n"
         "  grew most in 1h, since sample 6 (2026-10-16T19:48:11Z), by own growth:"
         " none\n"
     )
@@ -916,6 +928,78 @@ def test_display_path_is_printable(path, shown):
     assert shown.isprintable()
 
 
+SGR = re.compile(r"\x1b\[[0-9;]*m")
+BOLD, DIM, WARN, RESET = "\x1b[1m", "\x1b[2m", "\x1b[33m", "\x1b[0m"
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        stats_of(),
+        stats_of(samples=1500, root_first=None),
+        stats_of(samples=12, root_now=None, current_errors=Counter()),
+        stats_of(samples=0, recent=(), growth=(), root_now=None, root_first=None),
+        replace(stats_of(), tree_stats=()),
+        stats_of(key=replace(KEY, fs_path=b"/caf\xe9")),
+    ],
+)
+def test_render_text_in_color_has_the_plain_layout(stats):
+    colored = render_text(stats, color=True)
+    assert SGR.search(colored)
+    assert SGR.sub("", colored) == render_text(stats)
+
+
+def test_render_text_in_color_marks_structure_and_errors():
+    lines = render_text(stats_of(), color=True).splitlines()
+    assert lines[0].startswith(f"{BOLD}Database:{RESET} schema version 5;")
+    assert lines[2] == (
+        f"{BOLD}Tree projects{RESET} {DIM}(cluster"
+        " 11111111-2222-4333-8444-555555555555, default filesystem, path"
+        f" /proj/sub, depth 4){RESET}"
+    )
+    assert lines[4] == (
+        f"  {DIM}current:{RESET} 72.0k directories;"
+        f" {WARN}41 had errors: open EACCES 41{RESET}"
+    )
+    assert lines[6].startswith(f"  {DIM}ROOT:{RESET}    3.5 TiB, ")
+    header, row = lines[9:11]
+    assert header.startswith(f"  {DIM}sample  kind ") and header.endswith(
+        f"source{RESET}"
+    )
+    assert f"  {WARN}41{RESET}  1000  live" in row
+    assert lines[11] == f"  {DIM}1 older sample not shown{RESET}"
+    assert lines[13].startswith(f"  {BOLD}grew most in 7d (all history), since")
+    assert lines[-1].endswith(f"by own growth:{RESET} none")
+
+
+def test_render_text_in_color_leaves_no_errors_plain():
+    text = render_text(stats_of(current_errors=Counter()), color=True)
+    assert f"{DIM}current:{RESET} 72.0k directories; none had errors\n" in text
+    clean = (replace(s, errors=0) for s in stats_of().tree_stats[0].recent)
+    assert WARN not in render_text(
+        stats_of(recent=tuple(clean), current_errors=Counter()), color=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("tty", "no_color", "wanted"),
+    [
+        (True, None, True),
+        (True, "", True),
+        (True, "1", False),
+        (False, None, False),
+    ],
+)
+def test_color_wanted(tty, no_color, wanted, monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(stream, "isatty", lambda: tty)
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    assert color_wanted(stream) is wanted
+
+
 def test_render_json():
     text = render_json(stats_of(root_first=None))
     assert text.endswith("}\n")
@@ -970,6 +1054,16 @@ def test_cli_prints_the_report_on_stdout(initial, dsn, capsys):
     assert stderr == ""
     assert stdout.startswith("Database: schema version 5; 1 tree, 1 sample,")
     assert f"\nTree {initial.name} ({tree_identity(initial.tree)})\n" in stdout
+
+
+def test_cli_colors_a_terminal_unless_no_color(initial, dsn, capsys, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert main(["db", "summary", "--db", dsn]) == 0
+    colored = capsys.readouterr().out
+    assert SGR.search(colored)
+    assert main(["db", "summary", "--db", dsn, "--no-color"]) == 0
+    assert capsys.readouterr().out == SGR.sub("", colored)
 
 
 def test_cli_json_honors_tree_and_samples(initial, dsn, capsys):

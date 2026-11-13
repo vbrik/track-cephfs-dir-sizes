@@ -164,7 +164,9 @@ day and the last week). Read-only; the report goes to stdout.
 
 DB_SUMMARY_EPILOG = f"""\
 The text shows counts to 3 significant digits with SI prefixes (k is 1000,
-M is 1000k, and so on); --json shows them exactly.
+M is 1000k, and so on); --json shows them exactly. On a terminal the text is
+colored, errors in yellow; --no-color or a non-empty NO_COLOR turns color
+off.
 
 A sample is initial if its tree had no current directories before it, else
 incremental. A directory a sample stored is new if it had no current row
@@ -368,12 +370,16 @@ def _prepare_db_init(args: argparse.Namespace) -> _Command:
 
 def _prepare_db_summary(args: argparse.Namespace) -> _Command:
     dsn = _dsn(args)
-    render = summary.render_json if args.json else summary.render_text
 
     def run() -> str:
         since = args.since or DEFAULT_WINDOWS
         stats = summary.run_summary(dsn, args.tree, args.samples, args.top, since)
-        sys.stdout.write(render(stats))
+        if args.json:
+            text = summary.render_json(stats)
+        else:
+            color = not args.no_color and summary.color_wanted(sys.stdout)
+            text = summary.render_text(stats, color=color)
+        sys.stdout.write(text)
         return ""
 
     return _Command(run, dbcli.DB_UNCHANGED)
@@ -635,6 +641,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     summarize.add_argument(
         "--json", action="store_true", help="print JSON instead of text"
+    )
+    summarize.add_argument(
+        "--no-color", action="store_true", help="print text without color"
     )
     _add_db(summarize)
     return parser
