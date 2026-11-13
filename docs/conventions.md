@@ -65,12 +65,13 @@
   are allowed only where they remove a read of history, and only
   `db.store_sample` writes them, in the transaction that stores the rows;
   a test rebuilds each from `dir_state` (`conftest.assert_invariants`).
-- Queries that join `path` or `current_dir_state` by tree depend on the
-  planner knowing the tree's size. `db.store_sample` runs `ANALYZE` after it
-  adds `db.ANALYZE_AFTER` paths or more, and the DDL makes autovacuum do so
-  after as many changed rows. Test a new such query on a database that holds
-  another tree and has been analyzed before the tree under test existed:
-  without statistics, or with one tree, a bad plan does not show.
+- Queries that join `path` or `current_dir_state` by tree, or `dir_state`
+  by sample, depend on the planner knowing how many rows a tree or a sample
+  has. `db.store_sample` runs `ANALYZE` after it stores `db.ANALYZE_AFTER`
+  rows or more, and the DDL makes autovacuum do so after as many changed
+  rows. Test a new such query on a database that holds another tree and has
+  been analyzed before the rows under test existed: without statistics, or
+  with one tree, a bad plan does not show.
 - A tree is told from another in one place, `db._resolve_tree`, which checks
   a tree name against a mount identity (`db.TreeKey`). No other code compares
   names in place of mount identities or looks a tree up by one of them alone
@@ -78,9 +79,11 @@
 - A tree's latest sample is the one with the greatest `(started, id)`, in the
   baseline, the current state, the order guard, the stale-baseline check and
   the summary alike.
-- Schema version 5 is the first production version. A change to the DDL
-  raises `SCHEMA_VERSION` and adds an upgrade step from the previous
-  version, run by `trackdir db upgrade` in one transaction. trackdir refuses
+- Schema version 5 is the first production version. Its DDL is frozen when
+  the first production database is created with `db init`; until then it
+  may still change, and development databases are created again. After
+  that, a change to the DDL raises `SCHEMA_VERSION` and adds an upgrade step
+  from the previous version, run by `trackdir db upgrade` in one transaction. trackdir refuses
   a database at an older version and names that command; it refuses a newer
   one and asks for a newer trackdir. `db upgrade` is built with the first
   version-6 change; versions before 5 cannot be upgraded.

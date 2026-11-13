@@ -157,15 +157,27 @@ current errors without reading the tree.
 
 ### Planner statistics
 
-trackdir's own queries join `path` and `current_dir_state` by tree, and
-PostgreSQL plans them from statistics that describe the trees present when
-they were gathered. A tree added or grown since then looks empty, and a
-query on it can be planned badly enough to take hours. So `db init` sets
-both tables to have their statistics refreshed by autovacuum after 1000
-changed rows, not after changes to a tenth of the table, and a sample that
-adds 1000 or more directories runs `ANALYZE` on them itself. Keep autovacuum
-enabled. If you load or change these tables by other means, run `ANALYZE` on
-them afterwards.
+trackdir's own queries join `path` and `current_dir_state` by tree and
+`dir_state` by sample, and PostgreSQL plans them from statistics that
+describe the tables as they were when gathered. A tree added or grown since
+then, or samples stored since then, look empty, and a query on them can be
+planned badly enough to take hours. So:
+
+- `db init` sets these three tables to have their statistics refreshed by
+  autovacuum after 1000 changed rows, not after changes to a tenth of the
+  table. A database created by an earlier development version of schema 5
+  lacks these settings; create it again with `db init`.
+- A sample that stores 1000 or more rows (new, changed or deleted
+  directories) runs `ANALYZE` on the three tables itself. `ANALYZE` reads at
+  most 30,000 pages of a table (240 MB, at the default statistics target),
+  whatever its size: 0.2 s for 10 million rows on local NVMe with the table
+  cached, possibly seconds per table on slower storage. It holds a lock until
+  the sample commits, so two such samples of different trees take turns.
+
+Keep autovacuum enabled. If you load or change these tables by other means,
+run `ANALYZE` on them afterwards. An anti-wraparound vacuum of one of them is
+the one autovacuum run that a sample does not cancel: a large sample waits for
+it to finish.
 
 ## Example queries
 

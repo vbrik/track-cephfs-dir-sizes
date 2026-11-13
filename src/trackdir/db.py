@@ -34,10 +34,12 @@ TREE_NAME_RULE = (
     "1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-', the first a letter or digit"
 )
 
-# A sample that adds at least this many paths refreshes the planner's
-# statistics of the tables it joins (see store_sample), and autovacuum does so
-# after this many changed rows (see the DDL). Below it a misplanned join costs
-# little: a million comparisons at this size.
+# A sample that stores at least this many rows refreshes the planner's
+# statistics of path, current_dir_state and dir_state (see store_sample), and
+# autovacuum refreshes them after this many changed rows (see the DDL). A join
+# planned from stale statistics costs about the sample's rows times the rows
+# the statistics do not know of: this bounds the first factor in the store,
+# and autovacuum the second between samples.
 ANALYZE_AFTER = 1000
 
 SCHEMA_VERSION = 5  # of DDL; version 4 cannot be migrated, a mismatch is fatal
@@ -159,14 +161,17 @@ CREATE TABLE trackdir.current_dir_state (
 CREATE INDEX current_dir_state_errors ON trackdir.current_dir_state (tree_id)
     WHERE error_stage IS NOT NULL;
 
--- store_sample joins these two by tree. By default autovacuum refreshes a
--- table's statistics after changes to a tenth of it, which on a large table
--- leaves a new or growing tree unknown to the planner for a long time, and
--- its samples planned as if it had no rows. Refresh after a fixed number of
--- changed rows instead.
+-- store_sample joins path and current_dir_state by tree, and summarize joins
+-- dir_state by sample. By default autovacuum refreshes a table's statistics
+-- after changes to a tenth of it, which on a large table leaves a new or
+-- growing tree, or recent samples, unknown to the planner for a long time,
+-- and queries on them planned as if they had no rows. Refresh after a fixed
+-- number of changed rows instead.
 ALTER TABLE trackdir.path SET
     (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ANALYZE_AFTER);
 ALTER TABLE trackdir.current_dir_state SET
+    (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ANALYZE_AFTER);
+ALTER TABLE trackdir.dir_state SET
     (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ANALYZE_AFTER);
 """.replace("TREE_NAME", TREE_NAME.pattern).replace(  # noqa: E501
     "ANALYZE_AFTER", str(ANALYZE_AFTER)
@@ -641,33 +646,42 @@ def store_sample(
         cur.execute(_CREATE_STAGE)
         columns = ", ".join(STAGE_COLUMNS)
         gone = (None,) * len(ROW_COLUMNS)
+        staged = 0
         with cur.copy(f"COPY trackdir_stage ({columns}) FROM STDIN") as copy:
             for probe in diff.changed:
                 copy.write_row((*dir_state_row(probe), False))
+                staged += 1
             for path in diff.deleted:
                 copy.write_row((path, *gone, True))
+                staged += 1
         params = {"tree": tree_id, "sample": sample_id}
         # autovacuum never analyzes a temporary table, and a large sample
         # needs the planner to know its size
         cur.execute("ANALYZE trackdir_stage")
-        # Statistics gathered before these paths existed say the tree has
-        # none (a new tree) or far fewer, and the joins below are then planned
-        # for a single path: a nested loop over all the new ones, quadratic in
-        # the sample's size. Autovacuum refreshes them only later.
-        bulk = cur.execute(_INSERT_PATHS, params).rowcount >= ANALYZE_AFTER
+        # Statistics gathered before this tree existed, or before it grew,
+        # say it has few rows or none, and the joins below are then planned
+        # for one: a nested loop that compares every staged row with every
+        # row of the tree, quadratic in a large sample. So a large sample
+        # refreshes the statistics first, whether its rows are new paths,
+        # changes or tombstones. ANALYZE reads a sample of the table: its
+        # cost is bounded, not proportional to the table.
+        bulk = staged >= ANALYZE_AFTER
+        cur.execute(_INSERT_PATHS, params)
         if bulk:
             cur.execute("ANALYZE trackdir.path")
+            cur.execute("ANALYZE trackdir.current_dir_state")
         # Reads the current state as it was before the sample, so it runs
         # before the statements that change it.
         new, modified, deleted = cur.execute(_INSERT_STATES, params).fetchone()
         cur.execute(_UPSERT_CURRENT, params)
-        if bulk:  # for the delete below, and for the tree's next sample
-            cur.execute("ANALYZE trackdir.current_dir_state")
-        # Without tombstones the delete has nothing to do, yet with stale
-        # statistics it was planned from the tree's "one" current row and
-        # compared every row of the tree with every staged row.
+        # Without tombstones the delete has nothing to do: skip it rather
+        # than plan it. With them it is planned from the statistics taken
+        # above, which count the rows it deletes.
         if diff.deleted:
             cur.execute(_DELETE_CURRENT, params)
+        if bulk:  # for db summary and the tree's next sample
+            cur.execute("ANALYZE trackdir.current_dir_state")
+            cur.execute("ANALYZE trackdir.dir_state")
         cur.execute(
             "UPDATE trackdir.sample SET new_dirs = %s, modified_dirs = %s,"
             " deleted_dirs = %s, store_seconds = %s WHERE id = %s",

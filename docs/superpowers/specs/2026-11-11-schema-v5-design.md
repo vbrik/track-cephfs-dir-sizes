@@ -268,18 +268,26 @@ mount). The statistics PostgreSQL plans with describe the trees present when
 they were gathered. For a tree added later they say it has no rows, and the
 store's joins were planned for one row: a nested loop that made the first
 sample of a second tree quadratic (7 minutes for 72,017 directories, 2 s once
-fixed). The load test missed it: it had one tree. Three measures:
+fixed). The load test missed it: it had one tree. The final review then
+found the same defect for a sample of many tombstones or changes, which added
+no paths (92 s for 30,000 tombstones), and in `db summary`'s growth, which
+joins `dir_state` by sample (58 s). The measures, as amended:
 
-- a sample that inserts 1000 or more paths runs `ANALYZE` on `path` before
-  the joins that read it, and on `current_dir_state` after the upsert;
+- a sample that stores 1000 or more rows, of any kind, runs `ANALYZE` on
+  `path` and `current_dir_state` before the joins that read them, and on
+  `current_dir_state` and `dir_state` at its end;
 - the delete of tombstoned paths is skipped when there are none;
-- both tables are set to be analyzed by autovacuum after 1000 changed rows
-  instead of after changes to a tenth of the table, which covers trees that
-  grow in smaller steps.
+- the three tables are set to be analyzed by autovacuum after 1000 changed
+  rows instead of after changes to a tenth of the table, which covers trees
+  that grow in smaller steps and samples stored between large ones.
 
-`ANALYZE` reads a sample of a table, so this adds a fraction of a second to
-such a sample whatever the table's size; it holds a lock until the store
-commits, so two large stores of different trees take turns.
+A join planned from stale statistics costs about the sample's rows times the
+rows the statistics do not know of; the threshold bounds the first factor
+and autovacuum the second. `ANALYZE` reads at most 30,000 pages of a table:
+0.2 s on 10 million rows on local NVMe, cached; seconds per table are
+possible on network storage. It holds a lock until the store commits, so two
+large stores of different trees take turns. These settings were added to the
+version-5 DDL without a version bump, as nothing was in production yet.
 
 **Removing a tree** deletes its `dir_state` rows (through its samples), its
 `current_dir_state` rows, its samples, its paths, then the tree row.

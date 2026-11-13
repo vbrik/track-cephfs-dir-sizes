@@ -1150,7 +1150,7 @@ def test_first_sample_of_a_second_tree_is_not_planned_for_an_empty_tree(db):
     assert_invariants(db)
 
 
-@pytest.mark.parametrize("table", ["path", "current_dir_state"])
+@pytest.mark.parametrize("table", ["path", "current_dir_state", "dir_state"])
 def test_statistics_of_the_joined_tables_are_refreshed_by_changes_not_by_share(
     db, table
 ):
@@ -1165,3 +1165,58 @@ def test_statistics_of_the_joined_tables_are_refreshed_by_changes_not_by_share(
         "autovacuum_analyze_scale_factor=0",
         f"autovacuum_analyze_threshold={db_module.ANALYZE_AFTER}",
     ]
+
+
+def no_autovacuum(conn) -> None:
+    """Keep autovacuum from refreshing statistics in the middle of a test."""
+    for table in ("path", "current_dir_state", "dir_state", "sample", "tree"):
+        conn.execute(f"ALTER TABLE trackdir.{table} SET (autovacuum_enabled = false)")
+
+
+def stale_tree(conn, monkeypatch, size: int) -> CaptureHeader:
+    """Store a tree of SIZE directories under /y that the planner's statistics
+    do not know of: they were gathered when only a small tree existed. Return
+    its header."""
+    init_schema(conn)
+    no_autovacuum(conn)
+    store(conn, HEADER, many(9))
+    conn.execute("ANALYZE")
+    other = replace(HEADER, fs_path="/y")
+    with monkeypatch.context() as m:
+        m.setattr(db_module, "ANALYZE_AFTER", 10**9)  # store without ANALYZE
+        conn.execute("SET enable_nestloop = off")  # and fast, despite that
+        store(conn, other, many(size))
+        conn.execute("RESET enable_nestloop")
+    assert reltuples(conn, "current_dir_state") == 10
+    return other
+
+
+def test_tombstones_on_a_tree_the_statistics_do_not_know_are_stored_fast(
+    db, monkeypatch
+):
+    """A sample that adds no paths used to refresh nothing; 30,000 tombstones
+    then took 92 s (quadratic), and 10,000 about 10 s."""
+    other = stale_tree(db, monkeypatch, 10_000)
+    clock = time.monotonic()
+    store(db, later(other, 60), many(0))  # every directory below ROOT deleted
+    assert time.monotonic() - clock < 3
+    assert reltuples(db, "current_dir_state") == 11
+    assert_invariants(db)
+
+
+def test_growth_after_a_large_sample_reads_fresh_statistics(db, monkeypatch):
+    """summarize joins dir_state by sample, and its statistics were left to
+    autovacuum: after 20,000 modified directories growth took over 10 s."""
+    init_schema(db)
+    no_autovacuum(db)
+    store(db, HEADER, many(9))
+    db.execute("ANALYZE")
+    other = replace(HEADER, fs_path="/y")
+    store(db, other, many(20_000))
+    store(db, later(other, 60), many(20_000, size=2))  # modifies every one
+    clock = time.monotonic()
+    stats = db_module.summarize(db, top=3)
+    assert time.monotonic() - clock < 3
+    tree = next(t for t in stats.tree_stats if t.key.fs_path == b"/y")
+    (growth,) = tree.growth
+    assert growth.positive_own == 20_000
