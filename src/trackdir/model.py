@@ -31,6 +31,11 @@ class Stage(StrEnum):
     READDIR = "readdir"
 
 
+# Error stages that leave a directory's subdirectories unread; an rstats error
+# still lists them.
+UNLISTING_STAGES = frozenset({Stage.OPEN, Stage.STAT, Stage.READDIR})
+
+
 @dataclass(frozen=True, slots=True)
 class ProbeError:
     """The error recorded for a directory: the failed step and an error code."""

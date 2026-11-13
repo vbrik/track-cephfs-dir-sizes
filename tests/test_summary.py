@@ -19,7 +19,6 @@ from trackdir.capture import Capture, load_capture, write_capture
 from trackdir.cli import main
 from trackdir.db import (
     DbStats,
-    DirGrowth,
     Growth,
     RootTotals,
     SampleStats,
@@ -29,6 +28,7 @@ from trackdir.db import (
     summarize,
 )
 from trackdir.dbcli import display_path, tree_identity
+from trackdir.growth import DirGrowth
 from trackdir.model import (
     ROOT,
     DirProbe,

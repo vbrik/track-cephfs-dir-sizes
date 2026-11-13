@@ -4,6 +4,7 @@ import pytest
 
 from trackdir.model import (
     ROOT,
+    UNLISTING_STAGES,
     DirProbe,
     ProbeError,
     Stage,
@@ -87,3 +88,8 @@ def test_error_counts():
     ]
     assert error_counts(probes) == {("open", "EACCES"): 2, ("readdir", "EIO"): 1}
     assert not error_counts([DirProbe(ROOT)])
+
+
+def test_unlisting_stages_hold_database_strings():
+    assert {"open", "stat", "readdir"} <= UNLISTING_STAGES
+    assert "rstats" not in UNLISTING_STAGES

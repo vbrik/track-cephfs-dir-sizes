@@ -22,6 +22,7 @@ from typing import Self, get_args
 from trackdir.model import (
     MAX_DEPTH_LIMIT,
     ROOT,
+    UNLISTING_STAGES,
     DirProbe,
     ProbeError,
     ShouldList,
@@ -87,7 +88,7 @@ def is_listed(probe: DirProbe, max_depth: int) -> bool:
     """Return whether a capture taken at MAX_DEPTH listed PROBE's directory."""
     if probe.depth >= max_depth:
         return False
-    return probe.error is None or probe.error.stage == Stage.RSTATS
+    return probe.error is None or probe.error.stage not in UNLISTING_STAGES
 
 
 class CaptureWriter:
