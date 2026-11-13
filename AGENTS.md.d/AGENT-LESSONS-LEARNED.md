@@ -18,3 +18,8 @@
   and can show changes their ancestors do not. Before reporting a mismatch
   between a pruned replay and a full capture, compare the mismatched rows'
   rctime with the capture's start.
+- Test database queries that join large tables under stale planner
+  statistics, not only on a fresh database: load one data set, run
+  `ANALYZE`, then load a second and time it. A fresh database or a single
+  data set hides plans that go quadratic, and a load test with one tree
+  proves nothing about a second.
