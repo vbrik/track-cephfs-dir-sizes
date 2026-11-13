@@ -22,6 +22,7 @@ from trackdir.messages import FatalError, describe_errors
 from trackdir.model import fs_absolute
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+_PREFIXES = ("k", "M", "G", "T", "P", "E")  # of counts, powers of 1000
 _GROWTH_COLUMNS = (  # (header, right-aligned) of the growth table
     ("own", True),
     ("share", True),
@@ -98,15 +99,42 @@ def format_bytes(size: int) -> str:
     return f"{sign}{value:.1f} {_UNITS[unit]}"
 
 
+def format_count(n: int) -> str:
+    """Return N to 3 significant digits with an SI prefix, e.g. "962", "72.0k"
+    or "-2.05M"; halves round away from zero.
+
+    Integer arithmetic keeps the rounding exact, as floats would not.
+    """
+    size = abs(n)
+    if size < 1000:
+        return str(n)
+    dropped = len(str(size)) - 3  # digits rounded away
+    digits = str((size + 5 * 10 ** (dropped - 1)) // 10**dropped)
+    if len(digits) > 3:  # rounded up to a power of ten: "1000"
+        digits, dropped = digits[:3], dropped + 1
+    prefix = min((dropped + 2) // 3, len(_PREFIXES))
+    whole = dropped + 3 - 3 * prefix  # digits before the decimal point
+    if whole < 3:
+        digits = f"{digits[:whole]}.{digits[whole:]}"
+    else:
+        digits += "0" * (whole - 3)
+    sign = "-" if n < 0 else ""
+    return f"{sign}{digits}{_PREFIXES[prefix - 1]}"
+
+
 def _tree_lines(tree: TreeStats) -> list[str]:
     lines = [f"Tree {tree.name} ({tree_identity(tree.key)})"]
-    samples = f"  samples: {tree.samples}"
+    samples = f"  samples: {format_count(tree.samples)}"
     if tree.first_started is not None and tree.last_started is not None:
         samples += f", {_moment(tree.first_started)} to {_moment(tree.last_started)}"
     lines.append(samples)
     lines.append(
         f"  current: {_count(tree.current_dirs, 'directory')}; "
         f"{describe_errors(tree.current_errors)}"
+    )
+    lines.append(
+        f"  db space: about {format_bytes(tree.bytes_on_disk_estimate)} on disk"
+        " (estimate)"
     )
     lines += _root_lines(tree.root_now, tree.root_first)
     if tree.recent:
@@ -179,10 +207,11 @@ def _signed_bytes(size: int) -> str:
 
 
 def _count(n: int, noun: str, *, signed: bool = False) -> str:
-    """Return e.g. "1 file", "3 files" or, if SIGNED, "+0 directories"."""
+    """Return e.g. "1 file", "72.0k files" or, if SIGNED, "+0 directories"."""
     if abs(n) != 1:
         noun = noun[:-1] + "ies" if noun.endswith("y") else noun + "s"
-    return f"{n:{'+' if signed else ''}} {noun}"
+    sign = "+" if signed and n >= 0 else ""
+    return f"{sign}{format_count(n)} {noun}"
 
 
 def _sample_row(sample: SampleStats) -> list[str]:
@@ -192,8 +221,10 @@ def _sample_row(sample: SampleStats) -> list[str]:
         sample.kind,
         _moment(sample.started),
         f"{took:.1f} s",
-        *map(str, (sample.probed, sample.new, sample.modified, sample.deleted)),
-        str(sample.errors),
+        *map(
+            format_count,
+            (sample.probed, sample.new, sample.modified, sample.deleted, sample.errors),
+        ),
         str(sample.euid),
         "live" if sample.replayed_from is None else "replay",
     ]

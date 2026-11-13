@@ -9,6 +9,7 @@ import os
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ from trackdir.model import (
     join,
     split,
 )
-from trackdir.summary import format_bytes, render_json, render_text
+from trackdir.summary import format_bytes, format_count, render_json, render_text
 
 DEPTH = 2  # of most replays; SUBTREE has 380 directories down to it
 # A window longer than any test's history: it starts at the first sample
@@ -133,6 +134,28 @@ def current(db) -> tuple[int, Counter[tuple[str, str]]]:
     return len(rows), Counter((s, c) for s, c in rows if s is not None)
 
 
+def space_estimates(db) -> dict[int, Fraction]:
+    """Each tree's share of the tree-scoped tables' space, from row counts."""
+    shares: dict[int, Fraction] = Counter()
+    for table, tree_of in [
+        ("sample", "x.tree_id"),
+        ("path", "x.tree_id"),
+        ("current_dir_state", "x.tree_id"),
+        ("dir_state", "(SELECT tree_id FROM trackdir.path WHERE id = x.path_id)"),
+    ]:
+        (size,) = db.execute(
+            "SELECT pg_total_relation_size(%s::regclass)", (f"trackdir.{table}",)
+        ).fetchone()
+        rows = dict(
+            db.execute(
+                f"SELECT {tree_of}, count(*) FROM trackdir.{table} x GROUP BY 1"
+            ).fetchall()
+        )
+        for tree_id, n in rows.items():
+            shares[tree_id] += Fraction(size * n, sum(rows.values()))
+    return shares
+
+
 def grew(db, *windows: Window, top: int = 3) -> tuple[Growth, ...]:
     """The first tree's growth over WINDOWS, by default SINCE_FIRST."""
     return summarize(db, top=top, since=windows or [SINCE_FIRST]).tree_stats[0].growth
@@ -190,6 +213,24 @@ def test_empty_database(db, dsn):
     assert (stats.trees, stats.samples, stats.dir_states) == (0, 0, 0)
     assert stats.bytes_on_disk > 0
     assert stats.tree_stats == ()
+
+
+def test_space_estimate_splits_each_table_by_its_rows(
+    db, dsn, subtree, initial, tmp_path
+):
+    """Of two trees of different sizes, each gets its share of each table."""
+    gone = ProbeError(Stage.OPEN, "ENOENT")
+    replay(dsn, only_root(subtree, tmp_path, "gone", gone), max_depth=DEPTH)
+    replay(dsn, edit(subtree, tmp_path, "back", 2), max_depth=DEPTH)
+    replay(dsn, SUBTREE, max_depth=1)
+    stats = summarize(db)
+    expected = space_estimates(db)
+    assert len(expected) == 2
+    for tree in stats.tree_stats:
+        assert abs(tree.bytes_on_disk_estimate - expected[tree.id]) <= 1
+    estimates = [t.bytes_on_disk_estimate for t in stats.tree_stats]
+    assert estimates[0] > estimates[1] > 0
+    assert sum(estimates) < stats.bytes_on_disk
 
 
 def test_initial_sample(db, subtree, initial):
@@ -274,8 +315,9 @@ def test_tree_whose_root_was_deleted_has_no_current_totals(
 def test_summary_without_growth_reads_no_history(
     db, dsn, subtree, initial, tmp_path, monkeypatch
 ):
-    """Counts and totals come from sample and current_dir_state; of dir_state
-    only ROOT's first row with rstats is read, through the primary key."""
+    """Counts and totals come from sample, path and current_dir_state; of
+    dir_state only ROOT's first row with rstats is read, through the primary
+    key."""
     import psycopg
 
     replay(dsn, edit(subtree, tmp_path, "second", 1), max_depth=DEPTH)
@@ -331,6 +373,8 @@ def test_tree_filter_and_recent_limit(db, dsn, subtree, initial, tmp_path):
     first = summarize(db, recent=1).tree_stats[0]
     assert first.samples == 2
     assert [s.kind for s in first.recent] == ["incremental"]
+    same_tree = everything.tree_stats[1]
+    assert tree.bytes_on_disk_estimate == same_tree.bytes_on_disk_estimate
     unknown = summarize(db, tree="nosuch")
     assert unknown.tree_stats == ()
     assert (unknown.trees, unknown.samples) == (everything.trees, everything.samples)
@@ -677,6 +721,7 @@ def stats_of(**changes) -> DbStats:
         last_started=T1,
         current_dirs=72017,
         current_errors=Counter({("open", "EACCES"): 41}),
+        bytes_on_disk_estimate=1536 * 2**20,
         root_now=RootTotals(7, 3 * 2**40 + 2**39, 4567890, 72017),
         root_first=RootTotals(5, 3 * 2**40, 4567000, 72018),
         recent=(newest,),
@@ -722,16 +767,43 @@ def test_format_bytes(size, text):
     assert format_bytes(size) == text
 
 
+@pytest.mark.parametrize(
+    ("n", "text"),
+    [
+        (0, "0"),
+        (962, "962"),
+        (999, "999"),
+        (-999, "-999"),
+        (1000, "1.00k"),
+        (1234, "1.23k"),
+        (1235, "1.24k"),  # halves round away from zero
+        (-1235, "-1.24k"),
+        (72017, "72.0k"),
+        (99949, "99.9k"),
+        (99950, "100k"),
+        (999499, "999k"),
+        (999500, "1.00M"),
+        (2054616, "2.05M"),
+        (166480104, "166M"),
+        (9_223_372_036_854_775_807, "9.22E"),
+        (10**22, "10000E"),
+    ],
+)
+def test_format_count(n, text):
+    assert format_count(n) == text
+
+
 def test_render_text():
     assert render_text(stats_of()) == (
-        "Database: schema version 5; 1 tree, 2 samples, 144434 dir_state rows;"
+        "Database: schema version 5; 1 tree, 2 samples, 144k dir_state rows;"
         " 37.7 MiB on disk\n"
         "\n"
         "Tree projects (cluster 11111111-2222-4333-8444-555555555555,"
         " default filesystem, path /proj/sub, depth 4)\n"
         "  samples: 2, 2026-10-15T20:48:11Z to 2026-10-16T20:48:11Z\n"
-        "  current: 72017 directories; 41 had errors: open EACCES 41\n"
-        "  ROOT:    3.5 TiB, 4567890 files, 72017 directories, last changed in"
+        "  current: 72.0k directories; 41 had errors: open EACCES 41\n"
+        "  db space: about 1.5 GiB on disk (estimate)\n"
+        "  ROOT:    3.5 TiB, 4.57M files, 72.0k directories, last changed in"
         " sample 7\n"
         "  change:  +512.0 GiB, +890 files, -1 directory since sample 5\n"
         "  sample  kind         started (UTC)           took  probed  new  modified"
@@ -750,6 +822,35 @@ def test_render_text():
     )
 
 
+def test_render_text_shortens_large_counts():
+    stats = stats_of()
+    (tree,) = stats.tree_stats
+    (newest,) = tree.recent
+    big = replace(newest, probed=2054616, new=72017, modified=1000, deleted=999)
+    first = replace(tree.root_first, rfiles=4567890 - 1234, rsubdirs=72017 + 2054616)
+    text = render_text(
+        replace(
+            stats,
+            tree_stats=(replace(tree, samples=1500, recent=(big,), root_first=first),),
+        )
+    )
+    assert "  samples: 1.50k, " in text
+    assert "  change:  +512.0 GiB, +1.23k files, -2.05M directories since" in text
+    assert "  1.50k older samples not shown\n" in text
+    (row,) = [line for line in text.splitlines() if "incremental" in line]
+    cells = ["7", "incremental", "2026-10-16T20:48:11Z", "13.2", "s"]
+    assert row.split() == [
+        *cells,
+        "2.05M",
+        "72.0k",
+        "1.00k",
+        "999",
+        "41",
+        "1000",
+        "live",
+    ]
+
+
 def test_render_text_marks_hidden_samples_and_missing_root():
     text = render_text(stats_of(samples=12, root_now=None))
     assert "  ROOT:    no rstats in its current row\n" in text
@@ -765,6 +866,7 @@ def test_render_text_of_a_tree_without_samples():
             last_started=None,
             current_dirs=0,
             current_errors=Counter(),
+            bytes_on_disk_estimate=0,
             root_now=None,
             root_first=None,
             recent=(),
@@ -773,6 +875,7 @@ def test_render_text_of_a_tree_without_samples():
     )
     assert "  samples: 0\n" in text
     assert "  current: 0 directories; none had errors\n" in text
+    assert "  db space: about 0 B on disk (estimate)\n" in text
     assert "sample  kind" not in text
 
 
@@ -829,6 +932,7 @@ def test_render_json():
     assert tree["key"]["fs_path"] == "/proj/sub"
     assert tree["key"]["fs_name"] is None
     assert tree["current_errors"] == [{"stage": "open", "code": "EACCES", "dirs": 41}]
+    assert tree["bytes_on_disk_estimate"] == 1536 * 2**20
     assert tree["root_first"] is None
     assert tree["root_now"]["rbytes"] == 3 * 2**40 + 2**39
     (newest,) = tree["recent"]

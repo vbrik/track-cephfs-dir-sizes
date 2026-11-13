@@ -381,6 +381,7 @@ class TreeStats:
     last_started: datetime | None
     current_dirs: int
     current_errors: Counter[tuple[str, str]]  # (stage, code) -> directories
+    bytes_on_disk_estimate: int  # its share of the tables, by their rows
     root_now: RootTotals | None  # None if ROOT's current row has no rstats
     root_first: RootTotals | None  # earliest ROOT row with rstats
     recent: tuple[SampleStats, ...]  # newest first
@@ -754,9 +755,13 @@ def summarize(
     window of SINCE, given 2 samples (see growth.window_start); TOP 0 skips
     growth. Without growth nothing depends on how much history is stored:
     counts come from the sample rows, totals from the current state and from
-    ROOT's first row with rstats. Growth reads, for each window, the rows
-    stored in it, the tree's current directories without rstats, and the
-    current rows of the directories these name and of their ancestors. One
+    ROOT's first row with rstats. A tree's space on disk is estimated by
+    splitting the size of each table its rows are in (sample, path, dir_state,
+    current_dir_state) by its share of the table's rows, which reads every
+    path row; rows differ in width, so it is approximate. Growth reads, for
+    each window, the rows stored in it, the tree's current directories
+    without rstats, and the current rows of the directories these name and of
+    their ancestors. One
     READ ONLY REPEATABLE READ transaction keeps all numbers consistent. Raises
     SchemaMissing or SchemaVersionMismatch unless the schema is current.
     """
@@ -764,6 +769,7 @@ def summarize(
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         _check_version(conn)
         counts = cur.execute(_COUNTS).fetchone()
+        space = dict(cur.execute(_SPACE_ESTIMATES).fetchall())  # of all trees
         tree_id = None
         if tree is not None:
             found = cur.execute(
@@ -799,6 +805,7 @@ def summarize(
             roots_now.get(tree_id),
             roots_first[tree_id],
             errors.get(tree_id, []),
+            space.get(tree_id, 0),
             recent,
             growth[tree_id],
         )
@@ -814,6 +821,30 @@ _COUNTS = """SELECT (SELECT count(*) FROM trackdir.tree),
         FROM trackdir.sample),
        (SELECT coalesce(sum(pg_total_relation_size(oid)), 0)::bigint
         FROM pg_class WHERE relnamespace = 'trackdir'::regnamespace AND relkind = 'r')
+"""
+# Each tree's share of the size of the tables it has rows in, by its share of
+# their rows. The sample rows count those of dir_state and current_dir_state,
+# as for DbStats.dir_states and TreeStats.current_dirs. Trees with no rows are
+# left out. Totals come from a join, not a window: no OVER without growth.
+_SPACE_ESTIMATES = """WITH tree_rows (tree_id, relname, n) AS (
+    SELECT tree_id, 'sample', count(*)::numeric FROM trackdir.sample GROUP BY 1
+    UNION ALL
+    SELECT tree_id, 'dir_state', sum(new_dirs + modified_dirs + deleted_dirs)
+    FROM trackdir.sample GROUP BY 1
+    UNION ALL
+    SELECT tree_id, 'current_dir_state', sum(new_dirs - deleted_dirs)
+    FROM trackdir.sample GROUP BY 1
+    UNION ALL
+    SELECT tree_id, 'path', count(*) FROM trackdir.path GROUP BY 1
+), totals AS (
+    SELECT relname, sum(n) AS n FROM tree_rows GROUP BY 1 HAVING sum(n) > 0
+)
+SELECT r.tree_id, round(sum(pg_total_relation_size(c.oid) * r.n / t.n))::bigint
+FROM tree_rows r
+JOIN totals t USING (relname)
+JOIN pg_class c ON c.relname = r.relname
+    AND c.relnamespace = 'trackdir'::regnamespace AND c.relkind = 'r'
+GROUP BY 1
 """
 _IN_TREE = "(%(tree)s::bigint IS NULL OR {column} = %(tree)s::bigint)"
 _TREES = (
@@ -997,6 +1028,7 @@ def _tree_stats(
     root_now: tuple | None,
     root_first: tuple | None,
     errors: list[tuple],
+    bytes_on_disk_estimate: int,
     recent: int,
     growth: tuple[Growth, ...],
 ) -> TreeStats:
@@ -1022,6 +1054,7 @@ def _tree_stats(
         last_started=stats[-1].started if stats else None,
         current_dirs=current,
         current_errors=Counter({(stage, code): n for stage, code, n in errors}),
+        bytes_on_disk_estimate=bytes_on_disk_estimate,
         root_now=RootTotals(*root_now) if root_now else None,
         root_first=RootTotals(*root_first) if root_first else None,
         recent=tuple(reversed(stats[-recent:])) if recent else (),

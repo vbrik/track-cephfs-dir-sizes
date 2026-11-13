@@ -155,18 +155,26 @@ DB_INIT_EPILOG = _exit_status(dbcli.DB_UNCHANGED, "also when the schema already 
 
 DB_SUMMARY_DESCRIPTION = f"""\
 Report what the database given by --db or {dbcli.DSN_ENV} holds: totals, then
-for each tree its samples, its current directories and errors, ROOT's size and
-its change since the first sample, the newest samples with what each stored,
-and the directories, at any depth, with the most own growth in each window
-given by --since (default: the last day and the last week). Read-only; the
-report goes to stdout.
+for each tree its samples, its current directories and errors, an estimate of
+its space in the database, ROOT's size and its change since the first sample,
+the newest samples with what each stored, and the directories, at any depth,
+with the most own growth in each window given by --since (default: the last
+day and the last week). Read-only; the report goes to stdout.
 """
 
 DB_SUMMARY_EPILOG = f"""\
+The text shows counts to 3 significant digits with SI prefixes (k is 1000,
+M is 1000k, and so on); --json shows them exactly.
+
 A sample is initial if its tree had no current directories before it, else
 incremental. A directory a sample stored is new if it had no current row
 before the sample, else modified; deleted counts its tombstones. Telling them
 apart reads every stored row of the trees reported.
+
+A tree's space is estimated by splitting the size of each table, with its
+indexes, by the tree's share of the table's rows; rows differ in width, so
+the estimate can be off by a tenth or so. Estimating it reads every path row.
+The database line's total also counts the small tables no tree owns.
 
 A window of --since D ends at the tree's latest sample and starts at the
 latest sample at least D before it; a tree with a shorter history is shown

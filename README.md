@@ -167,12 +167,13 @@ Example of `trackdir db summary --since 7d` (placeholders):
 
     Tree projects (cluster 1111…, default filesystem, path /proj/sub, depth 4)
       samples: 2, 2026-10-09T20:48:11Z to 2026-10-16T20:48:30Z
-      current: 72017 directories; 41 had errors: open EACCES 41
-      ROOT:    1.2 PiB, 412345678 files, 5123456 directories, last changed in sample 2
-      change:  +20.5 GiB, +1234 files, -3 directories since sample 1
+      current: 72.0k directories; 41 had errors: open EACCES 41
+      db space: about 52.3 MiB on disk (estimate)
+      ROOT:    1.2 PiB, 412M files, 5.12M directories, last changed in sample 2
+      change:  +20.5 GiB, +1.23k files, -3 directories since sample 1
       sample  kind         started (UTC)           took  probed    new  modified  deleted  errors  euid  source
            2  incremental  2026-10-16T20:48:30Z   0.1 s     962      0        17        0      41  1000  live
-           1  initial      2026-10-09T20:48:11Z  13.2 s   72017  72017         0        0      41  1000  live
+           1  initial      2026-10-09T20:48:11Z  13.2 s   72.0k  72.0k         0        0      41  1000  live
       grew most in 7d, since sample 1 (2026-10-09T20:48:11Z), by own growth:
                own  share       total  directory
          +12.0 GiB    58%   +12.0 GiB  /proj/sub/proj-a/run/2026/raw (subtree)
